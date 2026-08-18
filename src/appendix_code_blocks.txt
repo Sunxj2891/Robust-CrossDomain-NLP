@@ -1,0 +1,2456 @@
+\appendix
+
+\section*{Appendix}
+\addcontentsline{toc}{section}{Appendix}
+
+\subsection*{prep.ipynb}
+\begin{lstlisting}[language=Python, caption={prep.ipynb}]
+# Run this once if needed
+# %pip install -q datasets pandas requests pyarrow numpy tqdm
+
+from pathlib import Path
+import json
+
+root = Path.cwd()
+data_dir = root / "data"
+out_dir = root / "outputs"
+prep_dir = out_dir / "data_prep"
+
+go_raw = data_dir / "go_raw"
+imdb_raw = data_dir / "imdb_raw"
+
+for p in [data_dir, out_dir, prep_dir, go_raw, imdb_raw]:
+    p.mkdir(parents=True, exist_ok=True)
+
+cfg = {
+    "seed": 42,
+    "min_words": 3,
+    "length_bins": [0, 32, 64, 128, 256, 10**9],
+    "length_labels": ["0-32", "33-64", "65-128", "129-256", "256+"],
+    "priority": [
+        "admiration", "amusement", "approval", "caring", "desire", "excitement", "gratitude", "joy", "love", "optimism", "pride", "relief",
+        "anger", "annoyance", "disappointment", "disapproval", "disgust", "embarrassment", "fear", "grief", "nervousness", "remorse", "sadness",
+        "curiosity", "realization", "surprise", "neutral"
+    ],
+    "positive": [
+        "admiration", "amusement", "approval", "caring", "desire", "excitement", "gratitude", "joy", "love", "optimism", "pride", "relief"
+    ],
+    "negative": [
+        "anger", "annoyance", "disappointment", "disapproval", "disgust", "embarrassment", "fear", "grief", "nervousness", "remorse", "sadness"
+    ],
+    "neutral_other": ["neutral", "curiosity", "realization", "surprise"]
+}
+
+paths = {
+    "root": str(root),
+    "data_dir": str(data_dir),
+    "out_dir": str(out_dir),
+    "prep_dir": str(prep_dir),
+    "go_raw": str(go_raw),
+    "imdb_raw": str(imdb_raw),
+    "clean_imdb_binary": str(data_dir / "clean_imdb_binary.csv"),
+    "clean_goemotions_multiclass": str(data_dir / "clean_goemotions_multiclass.csv"),
+    "clean_goemotions_binary": str(data_dir / "clean_goemotions_binary.csv"),
+    "corpus_profile_report": str(prep_dir / "corpus_profile_report.csv"),
+    "dataset_validation_report": str(prep_dir / "dataset_validation_report.csv"),
+    "readiness_check": str(prep_dir / "readiness_check.csv"),
+    "go_zero_label": str(prep_dir / "go_zero_label.csv"),
+    "process_log": str(prep_dir / "process_log.txt"),
+    "config": str(prep_dir / "config.json")
+}
+
+with open(prep_dir / "config.json", "w", encoding="utf-8") as f:
+    json.dump({"paths": paths, "cfg": cfg}, f, ensure_ascii=False, indent=2)
+
+print("Current working directory:", root.resolve())
+print(json.dumps(paths, ensure_ascii=False, indent=2))
+
+import requests
+import tarfile
+
+imdb_url = "https://ai.stanford.edu/~amaas/data/sentiment/aclImdb_v1.tar.gz"
+imdb_tar = imdb_raw / "aclImdb_v1.tar.gz"
+imdb_dir = imdb_raw / "aclImdb"
+
+if not imdb_tar.exists():
+    with requests.get(imdb_url, stream=True, timeout=120) as r:
+        r.raise_for_status()
+        with open(imdb_tar, "wb") as f:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    f.write(chunk)
+
+if not imdb_dir.exists():
+    with tarfile.open(imdb_tar, "r:gz") as tar:
+        tar.extractall(imdb_raw)
+
+imdb_dir
+
+from datasets import load_dataset
+import pandas as pd
+
+go_ds = load_dataset("SetFit/go_emotions")
+
+for split in go_ds.keys():
+    pd.DataFrame(go_ds[split]).to_csv(go_raw / f"{split}.csv", index=False, encoding="utf-8-sig")
+
+list(go_raw.glob("*.csv"))
+
+import html
+import json
+import re
+import numpy as np
+import pandas as pd
+
+url_re = re.compile(r"https?://\S+|www\.\S+", re.I)
+space_re = re.compile(r"\s+")
+br_re = re.compile(r"(<br\s*/?>)+", re.I)
+
+
+def to_str(x):
+    if pd.isna(x):
+        return None
+    return str(x)
+
+
+def clean_text(x):
+    x = to_str(x)
+    if x is None:
+        return None
+    x = html.unescape(x)
+    x = br_re.sub(" ", x)
+    x = x.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    x = url_re.sub("[URL]", x)
+    x = space_re.sub(" ", x).strip()
+    return x if x else None
+
+
+def word_count(x):
+    return len(x.split()) if isinstance(x, str) else 0
+
+
+def char_count(x):
+    return len(x) if isinstance(x, str) else 0
+
+
+def avg_word_len(x):
+    toks = x.split() if isinstance(x, str) else []
+    return float(np.mean([len(t) for t in toks])) if toks else 0.0
+
+
+def upper_ratio(x):
+    if not isinstance(x, str):
+        return 0.0
+    letters = [c for c in x if c.isalpha()]
+    if not letters:
+        return 0.0
+    return sum(1 for c in letters if c.isupper()) / len(letters)
+
+
+def add_text_cols(df, text_col="text"):
+    df = df.copy()
+    df["text_lower"] = df[text_col].str.lower()
+    df["n_words"] = df[text_col].apply(word_count)
+    df["n_chars"] = df[text_col].apply(char_count)
+    df["avg_word_len"] = df[text_col].apply(avg_word_len)
+    df["upper_ratio"] = df[text_col].apply(upper_ratio)
+    df["exclaim_cnt"] = df[text_col].apply(lambda s: s.count("!") if isinstance(s, str) else 0)
+    df["question_cnt"] = df[text_col].apply(lambda s: s.count("?") if isinstance(s, str) else 0)
+    df["length_bin"] = pd.cut(
+        df["n_words"],
+        bins=cfg["length_bins"],
+        labels=cfg["length_labels"],
+        include_lowest=True,
+        right=True
+    ).astype(str)
+    return df
+
+
+def dedup_by_split_priority(df, split_col, text_col, priority_map):
+    df = df.copy()
+    df["_split_priority"] = df[split_col].map(priority_map).fillna(9999)
+    df["_text_key"] = df[text_col].astype(str).str.strip().str.lower()
+    df = df.sort_values(by=["_split_priority", "_text_key"], ascending=[True, True])
+    df = df.drop_duplicates(subset=["_text_key"], keep="first").copy()
+    df = df.drop(columns=["_split_priority", "_text_key"])
+    return df.reset_index(drop=True)
+
+
+def profile_table(df, name):
+    rows = []
+    for sp, part in df.groupby("split", dropna=False):
+        rows.append({
+            "dataset": name,
+            "split": sp,
+            "rows": int(len(part)),
+            "unique_text": int(part["text"].nunique()),
+            "dup_text": int(len(part) - part["text"].nunique()),
+            "mean_words": float(part["n_words"].mean()) if len(part) else np.nan,
+            "median_words": float(part["n_words"].median()) if len(part) else np.nan,
+            "p25_words": float(part["n_words"].quantile(0.25)) if len(part) else np.nan,
+            "p75_words": float(part["n_words"].quantile(0.75)) if len(part) else np.nan,
+            "min_words": float(part["n_words"].min()) if len(part) else np.nan,
+            "max_words": float(part["n_words"].max()) if len(part) else np.nan,
+            "labels": json.dumps(part["label"].value_counts(dropna=False).to_dict(), ensure_ascii=False)
+        })
+    return pd.DataFrame(rows)
+
+rows = []
+
+for split in ["train", "test"]:
+    for cls, label in [("pos", 1), ("neg", 0)]:
+        folder = imdb_dir / split / cls
+        for fp in folder.glob("*.txt"):
+            rows.append({
+                "dataset": "imdb",
+                "split": split,
+                "source_file": str(fp),
+                "orig_split": split,
+                "orig_class": cls,
+                "label": label,
+                "text_raw": fp.read_text(encoding="utf-8", errors="ignore")
+            })
+
+unsup_dir = imdb_dir / "train" / "unsup"
+for fp in unsup_dir.glob("*.txt"):
+    rows.append({
+        "dataset": "imdb",
+        "split": "unlabeled",
+        "source_file": str(fp),
+        "orig_split": "train_unsup",
+        "orig_class": "unsup",
+        "label": np.nan,
+        "text_raw": fp.read_text(encoding="utf-8", errors="ignore")
+    })
+
+imdb = pd.DataFrame(rows)
+imdb.insert(0, "row_id", range(1, len(imdb) + 1))
+imdb["text"] = imdb["text_raw"].apply(clean_text)
+imdb = imdb.dropna(subset=["text"]).copy()
+imdb = imdb[imdb["text"].apply(word_count) >= cfg["min_words"]].copy()
+imdb = imdb.drop_duplicates(subset=["split", "text"]).reset_index(drop=True)
+imdb = dedup_by_split_priority(
+    imdb,
+    split_col="split",
+    text_col="text",
+    priority_map={"test": 0, "train": 1, "unlabeled": 2}
+)
+imdb.insert(0, "id", [f"imdb_{i}" for i in range(1, len(imdb) + 1)])
+imdb = add_text_cols(imdb, "text")
+
+imdb = imdb[[
+    "id", "row_id", "dataset", "split", "source_file", "orig_split", "orig_class",
+    "label", "text_raw", "text", "text_lower", "n_words", "n_chars", "avg_word_len",
+    "upper_ratio", "exclaim_cnt", "question_cnt", "length_bin"
+]].copy()
+
+imdb.to_csv(data_dir / "clean_imdb_binary.csv", index=False, encoding="utf-8-sig")
+imdb.head()
+
+parts = []
+for fp in sorted(go_raw.glob("*.csv")):
+    tmp = pd.read_csv(fp)
+    tmp["split"] = fp.stem
+    tmp["source_file"] = str(fp)
+    parts.append(tmp)
+
+go = pd.concat(parts, ignore_index=True)
+
+base_cols = {"text", "split", "source_file", "id"}
+emotion_cols = []
+for c in go.columns:
+    if c in base_cols:
+        continue
+    vals = pd.Series(go[c]).dropna()
+    try:
+        u = set(vals.astype(int).unique().tolist())
+        if u.issubset({0, 1}):
+            emotion_cols.append(c)
+    except Exception:
+        pass
+emotion_cols = sorted(emotion_cols)
+
+priority_rank = {k: i for i, k in enumerate(cfg["priority"])}
+pos_set = set(cfg["positive"])
+neg_set = set(cfg["negative"])
+
+
+def active_labels(row):
+    labs = []
+    for c in emotion_cols:
+        try:
+            if int(row[c]) == 1:
+                labs.append(c)
+        except Exception:
+            pass
+    return labs
+
+
+def pick_main(labs):
+    if not labs:
+        return None
+    non_neutral = [x for x in labs if x != "neutral"]
+    pool = non_neutral if non_neutral else labs
+    pool = sorted(pool, key=lambda x: priority_rank.get(x, 999))
+    return pool[0] if pool else None
+
+
+def to_bin(label):
+    if label in pos_set:
+        return 1
+    if label in neg_set:
+        return 0
+    return np.nan
+
+go.insert(0, "row_id", range(1, len(go) + 1))
+go["text_raw"] = go["text"].apply(to_str)
+go["text"] = go["text_raw"].apply(clean_text)
+go = go.dropna(subset=["text"]).copy()
+go = go[go["text"].apply(word_count) >= cfg["min_words"]].copy()
+go["active_labels"] = go.apply(active_labels, axis=1)
+go["n_active"] = go["active_labels"].apply(len)
+
+zero_label = go[go["n_active"] == 0].copy()
+zero_label.to_csv(prep_dir / "go_zero_label.csv", index=False, encoding="utf-8-sig")
+
+go = go[go["n_active"] > 0].copy()
+go["main_label"] = go["active_labels"].apply(pick_main)
+go = go.dropna(subset=["main_label"]).copy()
+go = go.drop_duplicates(subset=["split", "text", "main_label"]).reset_index(drop=True)
+go = dedup_by_split_priority(
+    go,
+    split_col="split",
+    text_col="text",
+    priority_map={"test": 0, "validation": 1, "train": 2}
+)
+go.insert(0, "id", [f"go_{i}" for i in range(1, len(go) + 1)])
+go = add_text_cols(go, "text")
+go["bin_label"] = go["main_label"].apply(to_bin)
+go["dataset"] = "go"
+
+go_multi = go[[
+    "id", "row_id", "dataset", "split", "source_file", "text_raw", "text", "text_lower",
+    "main_label", "n_active", "n_words", "n_chars", "avg_word_len",
+    "upper_ratio", "exclaim_cnt", "question_cnt", "length_bin"
+]].copy().rename(columns={"main_label": "label"})
+
+go_bin = go[go["bin_label"].isin([0, 1])].copy()
+go_bin = go_bin[[
+    "id", "row_id", "dataset", "split", "source_file", "text_raw", "text", "text_lower",
+    "bin_label", "main_label", "n_active", "n_words", "n_chars", "avg_word_len",
+    "upper_ratio", "exclaim_cnt", "question_cnt", "length_bin"
+]].copy().rename(columns={"bin_label": "label", "main_label": "source_emotion"})
+
+go_multi.to_csv(data_dir / "clean_goemotions_multiclass.csv", index=False, encoding="utf-8-sig")
+go_bin.to_csv(data_dir / "clean_goemotions_binary.csv", index=False, encoding="utf-8-sig")
+
+go_multi.head(), go_bin.head()
+
+req_cols_bin = [
+    "id", "row_id", "dataset", "split", "source_file", "text_raw", "text", "text_lower",
+    "label", "n_words", "n_chars", "avg_word_len", "upper_ratio",
+    "exclaim_cnt", "question_cnt", "length_bin"
+]
+
+valid_rows = []
+valid_rows.append({
+    "check": "bin_columns_match",
+    "result": list(imdb[req_cols_bin].columns) == list(go_bin[req_cols_bin].columns),
+    "detail": "IMDb and GoEmotions binary tables share the same required columns."
+})
+valid_rows.append({
+    "check": "bin_label_values_imdb",
+    "result": set(imdb.loc[imdb["split"] != "unlabeled", "label"].dropna().unique().tolist()) == {0.0, 1.0},
+    "detail": "IMDb labeled rows use 0 and 1 only."
+})
+valid_rows.append({
+    "check": "bin_label_values_go",
+    "result": set(go_bin["label"].dropna().unique().tolist()) == {0.0, 1.0},
+    "detail": "GoEmotions binary rows use 0 and 1 only."
+})
+valid_rows.append({
+    "check": "no_null_text_imdb",
+    "result": int(imdb["text"].isna().sum()) == 0,
+    "detail": "IMDb clean table has no null text."
+})
+valid_rows.append({
+    "check": "no_null_text_go_bin",
+    "result": int(go_bin["text"].isna().sum()) == 0,
+    "detail": "GoEmotions binary clean table has no null text."
+})
+valid_rows.append({
+    "check": "text_lower_exists",
+    "result": all("text_lower" in df.columns for df in [imdb, go_multi, go_bin]),
+    "detail": "All clean tables keep a lowercased text column."
+})
+valid_rows.append({
+    "check": "length_bin_exists",
+    "result": all("length_bin" in df.columns for df in [imdb, go_multi, go_bin]),
+    "detail": "All clean tables keep a persistent length bin column."
+})
+valid_rows.append({
+    "check": "config_saved",
+    "result": (prep_dir / "config.json").exists(),
+    "detail": "External config file exists."
+})
+valid_rows.append({
+    "check": "zero_label_logged",
+    "result": (prep_dir / "go_zero_label.csv").exists(),
+    "detail": "Rows with zero active GoEmotions labels are logged."
+})
+train_text = set(imdb.loc[imdb["split"] == "train", "text"])
+test_text = set(imdb.loc[imdb["split"] == "test", "text"])
+valid_rows.append({
+    "check": "imdb_train_test_overlap_text",
+    "result": len(train_text.intersection(test_text)) == 0,
+    "detail": f"Shared texts across IMDb train and test: {len(train_text.intersection(test_text))}"
+})
+go_train = set(go_bin.loc[go_bin["split"].astype(str).str.contains("train", case=False, na=False), "text"])
+go_test = set(go_bin.loc[go_bin["split"].astype(str).str.contains("test", case=False, na=False), "text"])
+valid_rows.append({
+    "check": "go_train_test_overlap_text",
+    "result": len(go_train.intersection(go_test)) == 0,
+    "detail": f"Shared texts across GoEmotions train and test-like splits: {len(go_train.intersection(go_test))}"
+})
+valid = pd.DataFrame(valid_rows)
+valid.to_csv(prep_dir / "dataset_validation_report.csv", index=False, encoding="utf-8-sig")
+valid
+
+profile = pd.concat([
+    profile_table(imdb, "imdb"),
+    profile_table(go_multi, "go_multi"),
+    profile_table(go_bin, "go_bin")
+], ignore_index=True)
+profile.to_csv(prep_dir / "corpus_profile_report.csv", index=False, encoding="utf-8-sig")
+
+ready = pd.DataFrame([
+    {"item": "aligned_binary_columns", "status": bool(valid.loc[valid['check'] == 'bin_columns_match', 'result'].iloc[0])},
+    {"item": "aligned_binary_labels", "status": bool(valid.loc[valid['check'] == 'bin_label_values_imdb', 'result'].iloc[0]) and bool(valid.loc[valid['check'] == 'bin_label_values_go', 'result'].iloc[0])},
+    {"item": "text_is_string_cleaned", "status": int(imdb['text'].isna().sum()) == 0 and int(go_bin['text'].isna().sum()) == 0},
+    {"item": "text_lower_saved", "status": all('text_lower' in df.columns for df in [imdb, go_multi, go_bin])},
+    {"item": "config_externalized", "status": (prep_dir / 'config.json').exists()},
+    {"item": "meta_columns_saved", "status": all(set(['dataset', 'split', 'source_file']).issubset(df.columns) for df in [imdb, go_multi, go_bin])},
+    {"item": "length_bin_saved", "status": all('length_bin' in df.columns for df in [imdb, go_multi, go_bin])},
+    {"item": "go_zero_label_checked", "status": (prep_dir / 'go_zero_label.csv').exists()},
+    {"item": "imdb_unlabeled_kept", "status": 'unlabeled' in set(imdb['split'].astype(str))},
+    {"item": "imdb_train_test_no_overlap", "status": bool(valid.loc[valid['check'] == 'imdb_train_test_overlap_text', 'result'].iloc[0])},
+    {"item": "go_train_test_no_overlap", "status": bool(valid.loc[valid['check'] == 'go_train_test_overlap_text', 'result'].iloc[0])}
+])
+ready.to_csv(prep_dir / "readiness_check.csv", index=False, encoding="utf-8-sig")
+
+profile.head(), ready
+
+lines = [
+    "Data preparation finished.",
+    f"IMDb clean file: {data_dir / 'clean_imdb_binary.csv'}",
+    f"GoEmotions multiclass file: {data_dir / 'clean_goemotions_multiclass.csv'}",
+    f"GoEmotions binary file: {data_dir / 'clean_goemotions_binary.csv'}",
+    f"Corpus profile report: {prep_dir / 'corpus_profile_report.csv'}",
+    f"Validation report: {prep_dir / 'dataset_validation_report.csv'}",
+    f"Readiness report: {prep_dir / 'readiness_check.csv'}",
+    f"Zero-label log: {prep_dir / 'go_zero_label.csv'}",
+    f"Config file: {prep_dir / 'config.json'}"
+]
+
+with open(prep_dir / "process_log.txt", "w", encoding="utf-8") as f:
+    f.write("\n".join(lines))
+
+"\n".join(lines)
+
+for fp in [
+    data_dir / "clean_imdb_binary.csv",
+    data_dir / "clean_goemotions_multiclass.csv",
+    data_dir / "clean_goemotions_binary.csv",
+    prep_dir / "config.json",
+    prep_dir / "corpus_profile_report.csv",
+    prep_dir / "dataset_validation_report.csv",
+    prep_dir / "readiness_check.csv",
+    prep_dir / "go_zero_label.csv",
+    prep_dir / "process_log.txt",
+]:
+    print(fp, "->", fp.exists())
+\end{lstlisting}
+
+\subsection*{step2_features_final.ipynb}
+\begin{lstlisting}[language=Python, caption={step2_features_final.ipynb}]
+%pip install -q numpy pandas scipy scikit-learn statsmodels
+
+from pathlib import Path
+import json
+import re
+import string
+
+import numpy as np
+import pandas as pd
+import statsmodels.api as sm
+
+from scipy.spatial.distance import jensenshannon
+from scipy.stats import ks_2samp
+from sklearn.ensemble import RandomForestClassifier
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import f1_score
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+from statsmodels.stats.multitest import multipletests
+from statsmodels.stats.outliers_influence import variance_inflation_factor
+
+root = Path.cwd()
+data_dir = root / 'data'
+prep_dir = root / 'outputs' / 'data_prep'
+step2_dir = root / 'outputs' / 'step2_features'
+step2_dir.mkdir(parents=True, exist_ok=True)
+
+config_path = prep_dir / 'config.json'
+if not config_path.exists():
+    raise FileNotFoundError(f'Missing config file: {config_path}')
+
+with open(config_path, 'r', encoding='utf-8') as f:
+    step1_cfg = json.load(f)
+
+imdb_path = data_dir / 'clean_imdb_binary.csv'
+go_bin_path = data_dir / 'clean_goemotions_binary.csv'
+go_multi_path = data_dir / 'clean_goemotions_multiclass.csv'
+
+for fp in [imdb_path, go_bin_path, go_multi_path]:
+    if not fp.exists():
+        raise FileNotFoundError(f'Missing Step 1 clean file: {fp}')
+
+cfg2 = {
+    'seed': 42,
+    'dominant_value_ratio_max': 0.99,
+    'variance_eps': 1e-12,
+    'jsd_continuous_bins': 30,
+    'fdr_alpha': 0.05,
+
+    # Quantile-based stability thresholds
+    'use_quantile_thresholds': True,
+    'ks_keep_quantile': 0.25,          # keep lowest 25% KS
+    'jsd_keep_quantile': 0.50,         # keep lower 50% JSD
+    'cliff_keep_quantile': 0.25,       # keep lowest 25% |Cliff's delta|
+
+    # fallback fixed thresholds, kept for comparison / backup
+    'ks_max': 0.30,
+    'jsd_max': 0.10,
+    'cliffs_delta_max': 0.25,
+
+    'l1_coef_min': 1e-4,
+    'rf_importance_min': 1e-4,
+    'vif_max': 10.0,
+    'rf_estimators': 300,
+    'rf_max_depth': None,
+}
+print('root:', root)
+print('step2_dir:', step2_dir)
+print(json.dumps(cfg2, indent=2))
+
+imdb = pd.read_csv(imdb_path)
+go_bin = pd.read_csv(go_bin_path)
+go_multi = pd.read_csv(go_multi_path)
+
+required_cols = [
+    'id', 'dataset', 'split', 'text', 'text_lower', 'label',
+    'n_words', 'n_chars', 'avg_word_len', 'upper_ratio',
+    'exclaim_cnt', 'question_cnt', 'length_bin'
+]
+
+def check_required_columns(df, name):
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f'{name} missing required columns: {missing}')
+
+check_required_columns(imdb, 'imdb')
+check_required_columns(go_bin, 'go_bin')
+check_required_columns(go_multi, 'go_multi')
+
+imdb['domain'] = 'imdb'
+go_bin['domain'] = 'go'
+go_multi['domain'] = 'go'
+imdb['task'] = 'binary'
+go_bin['task'] = 'binary'
+go_multi['task'] = 'multiclass'
+
+imdb.shape, go_bin.shape, go_multi.shape
+
+paths2 = {
+    'feature_registry': step2_dir / 'feature_registry.csv',
+    'feature_registry_snapshot': step2_dir / 'feature_registry_snapshot.csv',
+    'all_features_raw': step2_dir / 'all_features_raw.csv',
+    'all_features_stats': step2_dir / 'all_features_stats.csv',
+    'stable_features_final': step2_dir / 'stable_features_final.csv',
+    'feature_diagnostics': step2_dir / 'feature_diagnostics.csv',
+    'step2_log': step2_dir / 'step2_log.txt',
+    'step2_config': step2_dir / 'step2_config.json',
+}
+
+with open(paths2['step2_config'], 'w', encoding='utf-8') as f:
+    json.dump({'cfg2': cfg2, 'paths2': {k: str(v) for k, v in paths2.items()}}, f, ensure_ascii=False, indent=2)
+
+{k: str(v) for k, v in paths2.items()}
+
+registry_rows = []
+
+def register_feature(feature_name, feature_group, feature_type, source_text,
+                     is_count=False, is_normalized=False, use_for_stability=True,
+                     notes=''):
+    registry_rows.append({
+        'feature_name': feature_name,
+        'feature_group': feature_group,
+        'feature_type': feature_type,
+        'source_text': source_text,
+        'is_count': bool(is_count),
+        'is_normalized': bool(is_normalized),
+        'use_for_stability': bool(use_for_stability),
+        'low_variance_filtered': False,
+        'selected_final': False,
+        'drop_reason': '',
+        'notes': notes,
+    })
+
+def registry_df():
+    return pd.DataFrame(registry_rows).drop_duplicates(subset=['feature_name'], keep='last').reset_index(drop=True)
+
+def update_registry(feature_name, **kwargs):
+    for row in registry_rows:
+        if row['feature_name'] == feature_name:
+            row.update(kwargs)
+
+TOKEN_RE = re.compile(r"\b\w+\b")
+SENT_RE = re.compile(r"[.!?]+")
+
+NEGATIONS = {'not', 'no', 'never', 'none', 'nobody', 'nothing', 'neither', 'nor', "n't"}
+INTENSIFIERS = {'very', 'really', 'extremely', 'totally', 'absolutely', 'highly', 'so', 'super'}
+DOWNTONERS = {'slightly', 'somewhat', 'barely', 'hardly', 'partly', 'fairly', 'rather'}
+POSITIVE_LEXICON = {'good', 'great', 'excellent', 'amazing', 'wonderful', 'love', 'liked', 'happy', 'joy', 'fun'}
+NEGATIVE_LEXICON = {'bad', 'terrible', 'awful', 'hate', 'hated', 'sad', 'angry', 'fear', 'boring', 'worse'}
+NEUTRAL_OTHER_LEXICON = {'maybe', 'perhaps', 'surprised', 'curious', 'realize', 'realized', 'guess', 'wonder'}
+
+def tokenize(text):
+    if not isinstance(text, str):
+        return []
+    return TOKEN_RE.findall(text)
+
+def split_sentences(text):
+    if not isinstance(text, str):
+        return []
+    parts = [p.strip() for p in SENT_RE.split(text) if p.strip()]
+    return parts
+
+def safe_div(a, b):
+    return float(a) / float(b) if b else 0.0
+
+def per_100_words(count, n_words):
+    return safe_div(count * 100.0, n_words)
+
+def type_token_ratio(tokens):
+    return safe_div(len(set(tokens)), len(tokens))
+
+def long_word_ratio(tokens, min_len=7):
+    return safe_div(sum(len(t) >= min_len for t in tokens), len(tokens))
+
+def short_word_ratio(tokens, max_len=3):
+    return safe_div(sum(len(t) <= max_len for t in tokens), len(tokens))
+
+def all_caps_token_ratio(text):
+    toks = tokenize(text)
+    if not toks:
+        return 0.0
+    return safe_div(sum(t.isupper() and len(t) > 1 for t in toks), len(toks))
+
+def repeat_char_ratio(text):
+    if not isinstance(text, str) or not text:
+        return 0.0
+    repeat_hits = len(re.findall(r'(.)\1{2,}', text))
+    return safe_div(repeat_hits, len(text))
+
+def punct_density(text):
+    if not isinstance(text, str) or not text:
+        return 0.0
+    punct = sum(ch in string.punctuation for ch in text)
+    return safe_div(punct, len(text))
+
+def count_lexicon(tokens, lexicon):
+    return sum(t in lexicon for t in tokens)
+
+def emotion_entropy(counts):
+    arr = np.array(counts, dtype=float)
+    s = arr.sum()
+    if s <= 0:
+        return 0.0
+    p = arr / s
+    p = p[p > 0]
+    return float(-(p * np.log2(p)).sum())
+
+def cliffs_delta(x, y):
+    x = np.asarray(pd.Series(x).dropna(), dtype=float)
+    y = np.asarray(pd.Series(y).dropna(), dtype=float)
+    if len(x) == 0 or len(y) == 0:
+        return np.nan
+    xy = np.subtract.outer(x, y)
+    return float((np.sum(xy > 0) - np.sum(xy < 0)) / (len(x) * len(y)))
+
+def probability_vector_discrete(x, y):
+    sx = pd.Series(x).dropna()
+    sy = pd.Series(y).dropna()
+    levels = sorted(set(sx.tolist()) | set(sy.tolist()))
+    if not levels:
+        return np.array([1.0]), np.array([1.0])
+    px = sx.value_counts().reindex(levels, fill_value=0).to_numpy(dtype=float)
+    py = sy.value_counts().reindex(levels, fill_value=0).to_numpy(dtype=float)
+    px = px / px.sum() if px.sum() else np.ones_like(px) / len(px)
+    py = py / py.sum() if py.sum() else np.ones_like(py) / len(py)
+    return px, py
+
+def probability_vector_continuous(x, y, n_bins=30):
+    sx = pd.Series(x).dropna().astype(float)
+    sy = pd.Series(y).dropna().astype(float)
+    if len(sx) == 0 or len(sy) == 0:
+        return np.array([1.0]), np.array([1.0])
+    global_min = float(min(sx.min(), sy.min()))
+    global_max = float(max(sx.max(), sy.max()))
+    if global_min == global_max:
+        return np.array([1.0]), np.array([1.0])
+    bins = np.linspace(global_min, global_max, n_bins + 1)
+    px, _ = np.histogram(sx, bins=bins)
+    py, _ = np.histogram(sy, bins=bins)
+    px = px.astype(float)
+    py = py.astype(float)
+    px = px / px.sum() if px.sum() else np.ones_like(px) / len(px)
+    py = py / py.sum() if py.sum() else np.ones_like(py) / len(py)
+    return px, py
+
+def compute_jsd(x, y, feature_type):
+    if feature_type == 'continuous':
+        px, py = probability_vector_continuous(x, y, n_bins=cfg2['jsd_continuous_bins'])
+    else:
+        px, py = probability_vector_discrete(x, y)
+    return float(jensenshannon(px, py, base=2.0) ** 2)
+
+base_feature_specs = [
+    ('n_words', 'structure', 'continuous', 'text', True, False, True, 'Step 1 base field'),
+    ('n_chars', 'structure', 'continuous', 'text', True, False, True, 'Step 1 base field'),
+    ('avg_word_len', 'structure', 'continuous', 'text', False, False, True, 'Step 1 base field'),
+    ('upper_ratio', 'style', 'continuous', 'text', False, False, True, 'Step 1 base field'),
+    ('exclaim_cnt', 'style', 'discrete', 'text', True, False, True, 'Step 1 base field'),
+    ('question_cnt', 'style', 'discrete', 'text', True, False, True, 'Step 1 base field'),
+    ('sentence_count', 'structure', 'discrete', 'text', True, False, True, ''),
+    ('avg_sentence_len_words', 'structure', 'continuous', 'text', False, False, True, ''),
+    ('type_token_ratio', 'structure', 'continuous', 'text_lower', False, False, True, ''),
+    ('long_word_ratio', 'structure', 'continuous', 'text_lower', False, False, True, ''),
+    ('short_word_ratio', 'structure', 'continuous', 'text_lower', False, False, True, ''),
+    ('all_caps_token_ratio', 'style', 'continuous', 'text', False, False, True, ''),
+    ('repeat_char_ratio', 'style', 'continuous', 'text', False, False, True, ''),
+    ('punct_density', 'style', 'continuous', 'text', False, False, True, ''),
+    ('exclaim_per_100w', 'style', 'continuous', 'text', True, True, True, ''),
+    ('question_per_100w', 'style', 'continuous', 'text', True, True, True, ''),
+    ('negation_cnt', 'lexical', 'discrete', 'text_lower', True, False, True, ''),
+    ('negation_per_100w', 'lexical', 'continuous', 'text_lower', True, True, True, ''),
+    ('intensifier_cnt', 'lexical', 'discrete', 'text_lower', True, False, True, ''),
+    ('intensifier_per_100w', 'lexical', 'continuous', 'text_lower', True, True, True, ''),
+    ('downtoner_cnt', 'lexical', 'discrete', 'text_lower', True, False, True, ''),
+    ('downtoner_per_100w', 'lexical', 'continuous', 'text_lower', True, True, True, ''),
+    ('positive_lexicon_ratio', 'emotion', 'continuous', 'text_lower', False, True, True, ''),
+    ('negative_lexicon_ratio', 'emotion', 'continuous', 'text_lower', False, True, True, ''),
+    ('neutral_other_ratio', 'emotion', 'continuous', 'text_lower', False, True, True, ''),
+    ('emotion_entropy', 'emotion', 'continuous', 'text_lower', False, False, True, ''),
+]
+
+for spec in base_feature_specs:
+    register_feature(*spec)
+
+registry_df().head()
+
+def extract_features(df):
+    out = df.copy()
+
+    tokens_lower = out['text_lower'].fillna('').apply(tokenize)
+    sentences = out['text'].fillna('').apply(split_sentences)
+
+    out['sentence_count'] = sentences.apply(len)
+    out['avg_sentence_len_words'] = [safe_div(len(toks), len(sents)) if len(sents) else 0.0 for toks, sents in zip(tokens_lower, sentences)]
+    out['type_token_ratio'] = tokens_lower.apply(type_token_ratio)
+    out['long_word_ratio'] = tokens_lower.apply(long_word_ratio)
+    out['short_word_ratio'] = tokens_lower.apply(short_word_ratio)
+
+    out['all_caps_token_ratio'] = out['text'].apply(all_caps_token_ratio)
+    out['repeat_char_ratio'] = out['text'].apply(repeat_char_ratio)
+    out['punct_density'] = out['text'].apply(punct_density)
+    out['exclaim_per_100w'] = [per_100_words(c, n) for c, n in zip(out['exclaim_cnt'], out['n_words'])]
+    out['question_per_100w'] = [per_100_words(c, n) for c, n in zip(out['question_cnt'], out['n_words'])]
+
+    out['negation_cnt'] = tokens_lower.apply(lambda toks: count_lexicon(toks, NEGATIONS))
+    out['negation_per_100w'] = [per_100_words(c, n) for c, n in zip(out['negation_cnt'], out['n_words'])]
+    out['intensifier_cnt'] = tokens_lower.apply(lambda toks: count_lexicon(toks, INTENSIFIERS))
+    out['intensifier_per_100w'] = [per_100_words(c, n) for c, n in zip(out['intensifier_cnt'], out['n_words'])]
+    out['downtoner_cnt'] = tokens_lower.apply(lambda toks: count_lexicon(toks, DOWNTONERS))
+    out['downtoner_per_100w'] = [per_100_words(c, n) for c, n in zip(out['downtoner_cnt'], out['n_words'])]
+
+    pos_cnt = tokens_lower.apply(lambda toks: count_lexicon(toks, POSITIVE_LEXICON))
+    neg_cnt = tokens_lower.apply(lambda toks: count_lexicon(toks, NEGATIVE_LEXICON))
+    neu_cnt = tokens_lower.apply(lambda toks: count_lexicon(toks, NEUTRAL_OTHER_LEXICON))
+
+    out['positive_lexicon_ratio'] = [safe_div(c, n) for c, n in zip(pos_cnt, out['n_words'])]
+    out['negative_lexicon_ratio'] = [safe_div(c, n) for c, n in zip(neg_cnt, out['n_words'])]
+    out['neutral_other_ratio'] = [safe_div(c, n) for c, n in zip(neu_cnt, out['n_words'])]
+    out['emotion_entropy'] = [emotion_entropy([p, n, u]) for p, n, u in zip(pos_cnt, neg_cnt, neu_cnt)]
+
+    return out
+
+imdb_feat = extract_features(imdb)
+go_bin_feat = extract_features(go_bin)
+go_multi_feat = extract_features(go_multi)
+
+all_features = pd.concat([imdb_feat, go_bin_feat, go_multi_feat], ignore_index=True)
+all_features.to_csv(paths2['all_features_raw'], index=False, encoding='utf-8-sig')
+registry_df().to_csv(paths2['feature_registry_snapshot'], index=False, encoding='utf-8-sig')
+
+all_features.shape
+
+feature_list = registry_df()['feature_name'].tolist()
+lv_rows = []
+
+binary_pool = pd.concat([
+    imdb_feat[imdb_feat['split'] != 'unlabeled'].copy(),
+    go_bin_feat.copy()
+], ignore_index=True)
+
+for feat in feature_list:
+    series = pd.Series(binary_pool[feat]).dropna()
+    variance = float(series.var()) if len(series) else np.nan
+    top_ratio = float(series.value_counts(normalize=True, dropna=False).iloc[0]) if len(series) else np.nan
+    low_var = (not np.isnan(variance) and variance <= cfg2['variance_eps']) or (not np.isnan(top_ratio) and top_ratio >= cfg2['dominant_value_ratio_max'])
+    lv_rows.append({'feature_name': feat, 'variance': variance, 'top_value_ratio': top_ratio, 'low_variance_filtered': low_var})
+    if low_var:
+        update_registry(feat, low_variance_filtered=True, use_for_stability=False, drop_reason='low_variance_or_dominant_value')
+
+lv_df = pd.DataFrame(lv_rows)
+lv_df.head()
+
+reg_now = registry_df()
+stable_pool = reg_now.loc[reg_now['use_for_stability'], ['feature_name', 'feature_group', 'feature_type']].copy()
+
+imdb_bin = imdb_feat[imdb_feat['split'] != 'unlabeled'].copy()
+go_bin_only = go_bin_feat.copy()
+
+stat_rows = []
+
+for _, row in stable_pool.iterrows():
+    feat = row['feature_name']
+    fgroup = row['feature_group']
+    ftype = row['feature_type']
+    x_go = pd.Series(go_bin_only[feat]).dropna()
+    x_imdb = pd.Series(imdb_bin[feat]).dropna()
+
+    ks_res = ks_2samp(x_go, x_imdb)
+
+    stat_rows.append({
+        'feature_name': feat,
+        'feature_group': fgroup,
+        'feature_type': ftype,
+        'n_go': int(len(x_go)),
+        'n_imdb': int(len(x_imdb)),
+        'ks_stat': float(ks_res.statistic),
+        'p_value_raw': float(ks_res.pvalue),
+        'cliffs_delta': float(cliffs_delta(x_go, x_imdb)),
+        'jsd': float(compute_jsd(x_go, x_imdb, ftype)),
+        'is_stable_candidate': False,
+        'selected_final': False,
+        'drop_reason': '',
+    })
+
+stats_df = pd.DataFrame(stat_rows)
+
+if len(stats_df):
+    reject, p_fdr, _, _ = multipletests(
+        stats_df['p_value_raw'].to_numpy(),
+        alpha=cfg2['fdr_alpha'],
+        method='fdr_bh'
+    )
+    stats_df['p_value_fdr'] = p_fdr
+    stats_df['reject_fdr'] = reject
+else:
+    stats_df['p_value_fdr'] = np.nan
+    stats_df['reject_fdr'] = False
+
+# Keep FDR only as a diagnostic signal, not a hard exclusion rule.
+stats_df['fdr_warning'] = stats_df['reject_fdr']
+
+# Absolute Cliff's delta for ranking stability
+stats_df['abs_cliffs_delta'] = stats_df['cliffs_delta'].abs()
+
+if cfg2.get('use_quantile_thresholds', False):
+    ks_cutoff = stats_df['ks_stat'].quantile(cfg2['ks_keep_quantile'])
+    jsd_cutoff = stats_df['jsd'].quantile(cfg2['jsd_keep_quantile'])
+    cliff_cutoff = stats_df['abs_cliffs_delta'].quantile(cfg2['cliff_keep_quantile'])
+
+    stats_df['is_stable_candidate'] = (
+        (stats_df['ks_stat'] <= ks_cutoff) &
+        (stats_df['jsd'] <= jsd_cutoff) &
+        (stats_df['abs_cliffs_delta'] <= cliff_cutoff)
+    )
+
+    stats_df['threshold_mode'] = 'quantile'
+    stats_df['ks_cutoff_used'] = float(ks_cutoff)
+    stats_df['jsd_cutoff_used'] = float(jsd_cutoff)
+    stats_df['cliff_cutoff_used'] = float(cliff_cutoff)
+
+else:
+    stats_df['is_stable_candidate'] = (
+        (stats_df['ks_stat'] <= cfg2['ks_max']) &
+        (stats_df['jsd'] <= cfg2['jsd_max']) &
+        (stats_df['abs_cliffs_delta'] <= cfg2['cliffs_delta_max'])
+    )
+
+    stats_df['threshold_mode'] = 'fixed'
+    stats_df['ks_cutoff_used'] = float(cfg2['ks_max'])
+    stats_df['jsd_cutoff_used'] = float(cfg2['jsd_max'])
+    stats_df['cliff_cutoff_used'] = float(cfg2['cliffs_delta_max'])
+
+unstable_mask = ~stats_df['is_stable_candidate']
+stats_df.loc[unstable_mask, 'drop_reason'] = 'distribution_shift_too_large'
+
+for _, row in stats_df.iterrows():
+    if row['is_stable_candidate']:
+        update_registry(row['feature_name'], drop_reason='')
+    else:
+        update_registry(row['feature_name'], drop_reason='distribution_shift_too_large')
+
+print('threshold_mode:', stats_df['threshold_mode'].iloc[0] if len(stats_df) else 'NA')
+print('ks_cutoff_used:', stats_df['ks_cutoff_used'].iloc[0] if len(stats_df) else 'NA')
+print('jsd_cutoff_used:', stats_df['jsd_cutoff_used'].iloc[0] if len(stats_df) else 'NA')
+print('cliff_cutoff_used:', stats_df['cliff_cutoff_used'].iloc[0] if len(stats_df) else 'NA')
+print('stable candidates:', int(stats_df['is_stable_candidate'].sum()))
+
+stats_df.sort_values(['is_stable_candidate', 'jsd', 'ks_stat'], ascending=[False, True, True]).head(20)
+
+candidate_features = stats_df.loc[stats_df['is_stable_candidate'], 'feature_name'].tolist()
+
+go_train = go_bin_feat[go_bin_feat['split'].astype(str).str.lower() == 'train'].copy()
+go_valid = go_bin_feat[go_bin_feat['split'].astype(str).str.lower() == 'validation'].copy()
+
+if not len(go_train):
+    raise ValueError('No GoEmotions train rows found for predictive validation.')
+
+y_train = go_train['label'].astype(int)
+y_valid = go_valid['label'].astype(int) if len(go_valid) else pd.Series(dtype=int)
+
+pred_rows = []
+
+if candidate_features:
+    X_train = go_train[candidate_features].copy()
+
+    l1_pipe = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(
+            penalty='l1',
+            solver='liblinear',
+            random_state=cfg2['seed'],
+            max_iter=2000,
+        ))
+    ])
+    l1_pipe.fit(X_train, y_train)
+    l1_coef = np.abs(l1_pipe.named_steps['clf'].coef_.ravel())
+
+    rf = RandomForestClassifier(
+        n_estimators=cfg2['rf_estimators'],
+        max_depth=cfg2['rf_max_depth'],
+        random_state=cfg2['seed'],
+        n_jobs=-1,
+    )
+    rf.fit(X_train, y_train)
+    rf_importance = rf.feature_importances_
+
+    for feat, coef_val, imp_val in zip(candidate_features, l1_coef, rf_importance):
+        has_signal = (coef_val > cfg2['l1_coef_min']) or (imp_val > cfg2['rf_importance_min'])
+        pred_rows.append({
+            'feature_name': feat,
+            'abs_l1_coef': float(coef_val),
+            'rf_importance': float(imp_val),
+            'has_predictive_signal': bool(has_signal),
+        })
+
+pred_df = pd.DataFrame(
+    pred_rows,
+    columns=['feature_name', 'abs_l1_coef', 'rf_importance', 'has_predictive_signal']
+)
+
+print('candidate_features:', len(candidate_features))
+print('pred_df shape:', pred_df.shape)
+print('pred_df columns:', pred_df.columns.tolist())
+
+pred_df.head()
+
+baseline_features = ['n_words', 'n_chars', 'avg_word_len', 'upper_ratio', 'exclaim_cnt', 'question_cnt']
+baseline_features = [f for f in baseline_features if f in go_train.columns]
+stable_signal_features = pred_df.loc[pred_df['has_predictive_signal'], 'feature_name'].tolist() if len(pred_df) else []
+combined_features = sorted(set(baseline_features) | set(stable_signal_features))
+
+compare_rows = []
+
+def run_validation_model(features):
+    if not features or len(go_valid) == 0:
+        return np.nan
+    pipe = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(
+            penalty='l2',
+            solver='liblinear',
+            random_state=cfg2['seed'],
+            max_iter=2000,
+        ))
+    ])
+    pipe.fit(go_train[features], y_train)
+    pred = pipe.predict(go_valid[features])
+    return float(f1_score(y_valid, pred))
+
+compare_rows.append({'model': 'baseline', 'features': len(baseline_features), 'validation_f1': run_validation_model(baseline_features)})
+compare_rows.append({'model': 'stable_only', 'features': len(stable_signal_features), 'validation_f1': run_validation_model(stable_signal_features)})
+compare_rows.append({'model': 'stable_plus_base', 'features': len(combined_features), 'validation_f1': run_validation_model(combined_features)})
+
+compare_df = pd.DataFrame(compare_rows)
+compare_df
+
+if 'feature_name' not in pred_df.columns:
+    pred_df = pd.DataFrame(
+        columns=['feature_name', 'abs_l1_coef', 'rf_importance', 'has_predictive_signal']
+    )
+
+stats_df = stats_df.merge(pred_df, on='feature_name', how='left')
+stats_df['has_predictive_signal'] = stats_df['has_predictive_signal'].fillna(False)
+stats_df['selected_final'] = stats_df['is_stable_candidate'] & stats_df['has_predictive_signal']
+
+stats_df.loc[
+    stats_df['is_stable_candidate'] & (~stats_df['has_predictive_signal']),
+    'drop_reason'
+] = 'no_predictive_gain'
+
+for _, row in stats_df.iterrows():
+    update_registry(
+        row['feature_name'],
+        selected_final=bool(row['selected_final']),
+        drop_reason=row['drop_reason'] if isinstance(row['drop_reason'], str) else ''
+    )
+
+stable_final = stats_df.loc[stats_df['selected_final']].copy()
+
+print('stable_final shape:', stable_final.shape)
+stable_final.head()
+
+diag_rows = []
+final_feature_list = stable_final['feature_name'].tolist()
+
+if len(final_feature_list) >= 2:
+    X_corr = go_train[final_feature_list].copy()
+    corr_matrix = X_corr.corr(numeric_only=True)
+    cols = corr_matrix.columns.tolist()
+    for i in range(len(cols)):
+        for j in range(i + 1, len(cols)):
+            if abs(corr_matrix.iloc[i, j]) >= 0.90:
+                diag_rows.append({'check': 'high_correlation_pair', 'feature_name': cols[i], 'value': float(corr_matrix.iloc[i, j]), 'detail': f'{cols[i]} vs {cols[j]}'})
+
+removed_vif = []
+current_features = final_feature_list.copy()
+
+while len(current_features) >= 2:
+    X_const = sm.add_constant(go_train[current_features].astype(float), has_constant='add')
+    vif_vals = []
+    for i, col in enumerate(X_const.columns):
+        if col == 'const':
+            continue
+        vif_vals.append((col, float(variance_inflation_factor(X_const.values, i))))
+    vif_df = pd.DataFrame(vif_vals, columns=['feature_name', 'vif']).sort_values('vif', ascending=False)
+    top_feat = str(vif_df.iloc[0]['feature_name'])
+    top_vif = float(vif_df.iloc[0]['vif'])
+    if top_vif <= cfg2['vif_max']:
+        break
+    removed_vif.append({'feature_name': top_feat, 'vif': top_vif})
+    update_registry(top_feat, selected_final=False, drop_reason='collinearity')
+    current_features.remove(top_feat)
+
+final_after_vif = current_features.copy()
+
+if len(final_after_vif) >= 1:
+    X_const = sm.add_constant(go_train[final_after_vif].astype(float), has_constant='add')
+    vif_final_df = []
+    for i, col in enumerate(X_const.columns):
+        if col == 'const':
+            continue
+        vif_final_df.append({'feature_name': col, 'vif': float(variance_inflation_factor(X_const.values, i))})
+    vif_final_df = pd.DataFrame(vif_final_df)
+else:
+    vif_final_df = pd.DataFrame(columns=['feature_name', 'vif'])
+
+for row in removed_vif:
+    diag_rows.append({'check': 'iterative_vif_removed', 'feature_name': row['feature_name'], 'value': row['vif'], 'detail': 'removed in iterative VIF elimination'})
+for _, row in vif_final_df.iterrows():
+    diag_rows.append({'check': 'final_vif', 'feature_name': row['feature_name'], 'value': row['vif'], 'detail': 'remaining feature after iterative elimination'})
+
+diagnostics_df = pd.DataFrame(diag_rows)
+final_registry = registry_df()
+final_stable_features = final_registry.loc[final_registry['selected_final'], ['feature_name']].merge(stats_df, on='feature_name', how='left')
+final_stable_features = final_stable_features[final_stable_features['feature_name'].isin(final_after_vif)].copy()
+final_stable_features['selected_final'] = True
+
+final_stable_features.head()
+
+final_registry = registry_df()
+stats_out = stats_df.copy()
+stats_out.loc[~stats_out['feature_name'].isin(final_after_vif), 'selected_final'] = False
+stats_out.loc[(stats_out['selected_final']) & (stats_out['feature_name'].isin(final_after_vif)), 'drop_reason'] = ''
+stats_out.loc[(~stats_out['feature_name'].isin(final_after_vif)) & (stats_out['drop_reason'] == ''), 'drop_reason'] = 'collinearity'
+
+final_registry.to_csv(paths2['feature_registry'], index=False, encoding='utf-8-sig')
+stats_out.to_csv(paths2['all_features_stats'], index=False, encoding='utf-8-sig')
+final_stable_features.to_csv(paths2['stable_features_final'], index=False, encoding='utf-8-sig')
+diagnostics_df.to_csv(paths2['feature_diagnostics'], index=False, encoding='utf-8-sig')
+
+checks = {
+    'feature_registry_exists': paths2['feature_registry'].exists(),
+    'feature_registry_snapshot_exists': paths2['feature_registry_snapshot'].exists(),
+    'all_features_raw_exists': paths2['all_features_raw'].exists(),
+    'all_features_stats_exists': paths2['all_features_stats'].exists(),
+    'stable_features_final_exists': paths2['stable_features_final'].exists(),
+    'feature_diagnostics_exists': paths2['feature_diagnostics'].exists(),
+    'step2_config_exists': paths2['step2_config'].exists(),
+    'stats_has_fdr': 'p_value_fdr' in stats_out.columns,
+    'stats_has_cliffs_delta': 'cliffs_delta' in stats_out.columns,
+    'stats_has_jsd': 'jsd' in stats_out.columns,
+    'registry_has_selected_final': 'selected_final' in final_registry.columns,
+    'stable_features_subset_consistent': set(final_stable_features['feature_name']).issubset(set(final_registry.loc[final_registry['selected_final'], 'feature_name'])),
+}
+
+log_lines = [
+    'Step 2 finished.',
+    f'IMDb input: {imdb_path}',
+    f'GoEmotions binary input: {go_bin_path}',
+    f'GoEmotions multiclass input: {go_multi_path}',
+    "Effect size: Cliff's delta",
+    f"Continuous JSD bins: global edges with {cfg2['jsd_continuous_bins']} bins",
+    'Predictive fitting boundary: GoEmotions train only',
+    'FDR is retained as a diagnostic warning, not a hard exclusion rule',
+    f"Threshold mode: {stats_df['threshold_mode'].iloc[0] if len(stats_df) else 'NA'}",
+    f"KS cutoff used: {stats_df['ks_cutoff_used'].iloc[0] if len(stats_df) else 'NA'}",
+    f"JSD cutoff used: {stats_df['jsd_cutoff_used'].iloc[0] if len(stats_df) else 'NA'}",
+    f"Cliff cutoff used: {stats_df['cliff_cutoff_used'].iloc[0] if len(stats_df) else 'NA'}",
+    f"Stable candidate count: {int(stats_df['is_stable_candidate'].sum())}",
+    f"Final selected feature count: {int(stats_df['selected_final'].sum())}",
+    f'Output folder: {step2_dir}',
+    f"feature_registry: {paths2['feature_registry']}",
+    f"feature_registry_snapshot: {paths2['feature_registry_snapshot']}",
+    f"all_features_raw: {paths2['all_features_raw']}",
+    f"all_features_stats: {paths2['all_features_stats']}",
+    f"stable_features_final: {paths2['stable_features_final']}",
+    f"feature_diagnostics: {paths2['feature_diagnostics']}",
+    f'validation_comparison_rows: {len(compare_df)}',
+]
+
+with open(paths2['step2_log'], 'w', encoding='utf-8') as f:
+    f.write('\n'.join(log_lines))
+
+if not all(checks.values()):
+    failed = [k for k, v in checks.items() if not v]
+    raise ValueError(f'Step 2 final checks failed: {failed}')
+
+pd.Series(checks)
+\end{lstlisting}
+
+\subsection*{step3_model.ipynb}
+\begin{lstlisting}[language=Python, caption={step3_model.ipynb}]
+# Run this once if needed.
+%pip install -q numpy pandas scikit-learn torch transformers accelerate
+
+from pathlib import Path
+import json
+import gc
+import random
+import warnings
+
+import numpy as np
+import pandas as pd
+
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import accuracy_score, f1_score, precision_score, recall_score, roc_auc_score
+from sklearn.model_selection import ParameterGrid, StratifiedKFold
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
+
+warnings.filterwarnings('ignore')
+
+root = Path.cwd()
+data_dir = root / 'data'
+out_dir = root / 'outputs'
+step2_dir = out_dir / 'step2_features'
+step3_dir = out_dir / 'step3_models'
+models_dir = step3_dir / 'models'
+preds_dir = step3_dir / 'predictions'
+reports_dir = step3_dir / 'reports'
+
+for p in [data_dir, out_dir, step3_dir, models_dir, preds_dir, reports_dir]:
+    p.mkdir(parents=True, exist_ok=True)
+
+cfg3 = {
+    'seed': 42,
+    'stable_features': [
+        'exclaim_cnt',
+        'exclaim_per_100w',
+        'downtoner_cnt',
+        'downtoner_per_100w',
+    ],
+    'high_conf_threshold': 0.90,
+    'oof_n_splits': 5,
+    'oof_cv_type': 'StratifiedKFold',
+    'early_fusion_pooling': 'cls',
+    'residual_meta_model': 'logistic_regression',
+    'text_model_name': 'distilbert-base-uncased',
+    'text_max_length': 96,
+    'text_batch_size': 4,
+    'text_learning_rate': 2e-5,
+    'text_num_epochs': 1,
+    'text_weight_decay': 0.01,
+    'text_warmup_ratio': 0.0,
+    'tfidf_param_grid': {
+        'tfidf__ngram_range': [(1, 1), (1, 2)],
+        'tfidf__max_features': [20000, 40000],
+        'clf__C': [0.5, 1.0, 2.0],
+    },
+    'stable_lr_param_grid': {
+        'C': [0.1, 1.0, 5.0],
+    },
+    'residual_lr_C': 1.0,
+}
+
+with open(step3_dir / 'step3_config.json', 'w', encoding='utf-8') as f:
+    json.dump(cfg3, f, ensure_ascii=False, indent=2)
+
+random.seed(cfg3['seed'])
+np.random.seed(cfg3['seed'])
+
+print('Current working directory:', root.resolve())
+print('data_dir:', data_dir)
+print('step2_dir:', step2_dir)
+print('step3_dir:', step3_dir)
+print(json.dumps(cfg3, ensure_ascii=False, indent=2))
+
+from pathlib import Path
+
+if 'root' not in globals():
+    root = Path.cwd()
+if 'data_dir' not in globals():
+    data_dir = root / 'data'
+if 'out_dir' not in globals():
+    out_dir = root / 'outputs'
+if 'step2_dir' not in globals():
+    step2_dir = out_dir / 'step2_features'
+if 'step3_dir' not in globals():
+    step3_dir = out_dir / 'step3_models'
+if 'models_dir' not in globals():
+    models_dir = step3_dir / 'models'
+if 'preds_dir' not in globals():
+    preds_dir = step3_dir / 'predictions'
+if 'reports_dir' not in globals():
+    reports_dir = step3_dir / 'reports'
+for p in [data_dir, out_dir, step2_dir, step3_dir, models_dir, preds_dir, reports_dir]:
+    p.mkdir(parents=True, exist_ok=True)
+
+if 'cfg3' not in globals():
+    cfg3 = {
+        'seed': 42,
+        'stable_features': [
+            'exclaim_cnt',
+            'exclaim_per_100w',
+            'downtoner_cnt',
+            'downtoner_per_100w',
+        ],
+        'high_conf_threshold': 0.90,
+        'oof_n_splits': 5,
+        'oof_cv_type': 'StratifiedKFold',
+        'early_fusion_pooling': 'cls',
+        'residual_meta_model': 'logistic_regression',
+        'text_model_name': 'distilbert-base-uncased',
+        'text_max_length': 128,
+        'text_batch_size': 16,
+        'text_learning_rate': 2e-5,
+        'text_num_epochs': 2,
+        'text_weight_decay': 0.01,
+        'text_warmup_ratio': 0.1,
+        'tfidf_param_grid': {
+            'tfidf__ngram_range': [(1, 1), (1, 2)],
+            'tfidf__max_features': [20000, 40000],
+            'clf__C': [0.5, 1.0, 2.0],
+        },
+        'stable_lr_param_grid': {
+            'C': [0.1, 1.0, 5.0],
+        },
+        'residual_lr_C': 1.0,
+    }
+
+
+def resolve_existing_path(candidates):
+    for fp in candidates:
+        if fp.exists():
+            return fp
+    raise FileNotFoundError('Missing required file. Checked: ' + ', '.join(str(x) for x in candidates))
+
+
+go_path = resolve_existing_path([
+    data_dir / 'clean_goemotions_binary.csv',
+    data_dir / 'gobin.csv',
+])
+
+imdb_path = resolve_existing_path([
+    data_dir / 'clean_imdb_binary.csv',
+    data_dir / 'imdb.csv',
+])
+
+stable_path = resolve_existing_path([
+    step2_dir / 'stable_features_final.csv',
+])
+
+go_df = pd.read_csv(go_path)
+imdb_df = pd.read_csv(imdb_path)
+stable_df = pd.read_csv(stable_path)
+
+if 'feature_name' not in stable_df.columns:
+    raise ValueError('stable_features_final.csv must include a feature_name column.')
+
+stable_features_from_file = stable_df['feature_name'].dropna().astype(str).tolist()
+missing_frozen = [c for c in cfg3['stable_features'] if c not in stable_features_from_file]
+if missing_frozen:
+    raise ValueError(f'Frozen stable features missing from stable_features_final.csv: {missing_frozen}')
+
+
+def ensure_basic_text_cols(df):
+    df = df.copy()
+    if 'text' not in df.columns:
+        raise ValueError('Input dataframe must include a text column.')
+    df['text'] = df['text'].astype(str)
+    if 'n_words' not in df.columns:
+        if 'nwords' in df.columns:
+            df['n_words'] = df['nwords']
+        else:
+            df['n_words'] = df['text'].str.split().apply(len)
+    return df
+
+
+def add_missing_stable_features(df):
+    df = ensure_basic_text_cols(df)
+    downtoners = {
+        'slightly', 'somewhat', 'rather', 'fairly', 'barely',
+        'hardly', 'partly', 'partially', 'relatively', 'moderately',
+        'kind of', 'kinda', 'sort of', 'a bit', 'a little'
+    }
+
+    if 'exclaim_cnt' not in df.columns:
+        if 'exclaimcnt' in df.columns:
+            df['exclaim_cnt'] = df['exclaimcnt']
+        else:
+            df['exclaim_cnt'] = df['text'].str.count('!')
+
+    if 'exclaim_per_100w' not in df.columns:
+        denom = df['n_words'].replace(0, np.nan)
+        df['exclaim_per_100w'] = (df['exclaim_cnt'] / denom) * 100.0
+        df['exclaim_per_100w'] = df['exclaim_per_100w'].fillna(0.0)
+
+    if 'downtoner_cnt' not in df.columns:
+        text_lower = df['text'].str.lower()
+
+        def count_downtoners(x):
+            total = 0
+            for term in downtoners:
+                total += x.count(term)
+            return total
+
+        df['downtoner_cnt'] = text_lower.apply(count_downtoners)
+
+    if 'downtoner_per_100w' not in df.columns:
+        denom = df['n_words'].replace(0, np.nan)
+        df['downtoner_per_100w'] = (df['downtoner_cnt'] / denom) * 100.0
+        df['downtoner_per_100w'] = df['downtoner_per_100w'].fillna(0.0)
+
+    return df
+
+
+go_df = add_missing_stable_features(go_df)
+imdb_df = add_missing_stable_features(imdb_df)
+
+required_cols = ['id', 'text', 'label', 'split'] + cfg3['stable_features']
+for name, df in [('go', go_df), ('imdb', imdb_df)]:
+    missing = [c for c in required_cols if c not in df.columns]
+    if missing:
+        raise ValueError(f'Missing columns in {name} dataframe: {missing}')
+
+go_train = go_df[go_df['split'].astype(str).str.lower() == 'train'].copy()
+go_valid = go_df[go_df['split'].astype(str).str.lower() == 'validation'].copy()
+imdb_test = imdb_df[imdb_df['split'].astype(str).str.lower() == 'test'].copy()
+
+for df in [go_train, go_valid, imdb_test]:
+    df['text'] = df['text'].astype(str)
+    df['label'] = df['label'].astype(int)
+
+optional_cols = [c for c in ['lengthbin', 'length_bin'] if c in go_df.columns or c in imdb_df.columns]
+keep_cols = ['id', 'text', 'label', 'split'] + optional_cols + cfg3['stable_features']
+
+go_train = go_train[[c for c in keep_cols if c in go_train.columns]].copy()
+go_valid = go_valid[[c for c in keep_cols if c in go_valid.columns]].copy()
+imdb_test = imdb_test[[c for c in keep_cols if c in imdb_test.columns]].copy()
+
+print('go_path:', go_path)
+print('imdb_path:', imdb_path)
+print('stable_path:', stable_path)
+print('go_train:', go_train.shape)
+print('go_valid:', go_valid.shape)
+print('imdb_test:', imdb_test.shape)
+print(go_train[cfg3['stable_features']].head())
+
+def compute_metrics(y_true, y_pred, y_prob):
+    metrics = {
+        'f1': float(f1_score(y_true, y_pred, zero_division=0)),
+        'accuracy': float(accuracy_score(y_true, y_pred)),
+        'precision': float(precision_score(y_true, y_pred, zero_division=0)),
+        'recall': float(recall_score(y_true, y_pred, zero_division=0)),
+    }
+    try:
+        metrics['roc_auc'] = float(roc_auc_score(y_true, y_prob))
+    except Exception:
+        metrics['roc_auc'] = np.nan
+    return metrics
+
+
+def prediction_frame(df, model_name, y_prob, threshold=0.5):
+    y_prob = np.asarray(y_prob, dtype=float)
+    y_pred = (y_prob >= threshold).astype(int)
+    out = df[['id', 'text', 'label']].copy()
+    out['model_name'] = model_name
+    out['pred_prob'] = y_prob
+    out['pred_label'] = y_pred
+    for c in cfg3['stable_features']:
+        out[c] = df[c].to_numpy()
+    for c in ['lengthbin', 'length_bin']:
+        if c in df.columns:
+            out[c] = df[c].astype(str).to_numpy()
+    return out
+
+
+def append_result(rows, split_name, model_name, metric_dict, extra=None):
+    row = {'split_name': split_name, 'model_name': model_name}
+    row.update(metric_dict)
+    if extra:
+        row.update(extra)
+    rows.append(row)
+
+results_rows = []
+
+X_train_text = go_train['text'].astype(str).tolist()
+y_train = go_train['label'].astype(int).to_numpy()
+X_valid_text = go_valid['text'].astype(str).tolist()
+y_valid = go_valid['label'].astype(int).to_numpy()
+X_test_text = imdb_test['text'].astype(str).tolist()
+y_test = imdb_test['label'].astype(int).to_numpy()
+
+best_tfidf = None
+best_valid_f1 = -1.0
+best_tfidf_params = None
+
+for params in ParameterGrid(cfg3['tfidf_param_grid']):
+    pipe = Pipeline([
+        ('tfidf', TfidfVectorizer(lowercase=True, strip_accents='unicode')),
+        ('clf', LogisticRegression(max_iter=2000, random_state=cfg3['seed']))
+    ])
+    pipe.set_params(**params)
+    pipe.fit(X_train_text, y_train)
+    valid_prob = pipe.predict_proba(X_valid_text)[:, 1]
+    valid_pred = (valid_prob >= 0.5).astype(int)
+    valid_f1 = f1_score(y_valid, valid_pred, zero_division=0)
+    if valid_f1 > best_valid_f1:
+        best_valid_f1 = valid_f1
+        best_tfidf = pipe
+        best_tfidf_params = params
+
+val_prob = best_tfidf.predict_proba(X_valid_text)[:, 1]
+test_prob = best_tfidf.predict_proba(X_test_text)[:, 1]
+
+val_metrics = compute_metrics(y_valid, (val_prob >= 0.5).astype(int), val_prob)
+test_metrics = compute_metrics(y_test, (test_prob >= 0.5).astype(int), test_prob)
+append_result(results_rows, 'go_validation', 'L1_TFIDF_LR', val_metrics, {'best_params': json.dumps(best_tfidf_params)})
+append_result(results_rows, 'imdb_test', 'L1_TFIDF_LR', test_metrics, {'best_params': json.dumps(best_tfidf_params)})
+
+prediction_frame(go_valid, 'L1_TFIDF_LR', val_prob).to_csv(preds_dir / 'l1_tfidf_lr_go_validation_preds.csv', index=False, encoding='utf-8-sig')
+prediction_frame(imdb_test, 'L1_TFIDF_LR', test_prob).to_csv(preds_dir / 'l1_tfidf_lr_imdb_test_preds.csv', index=False, encoding='utf-8-sig')
+
+X_train_stable = go_train[cfg3['stable_features']].copy()
+X_valid_stable = go_valid[cfg3['stable_features']].copy()
+X_test_stable = imdb_test[cfg3['stable_features']].copy()
+
+best_stable = None
+best_valid_f1 = -1.0
+best_stable_params = None
+
+for params in ParameterGrid(cfg3['stable_lr_param_grid']):
+    pipe = Pipeline([
+        ('scaler', StandardScaler()),
+        ('clf', LogisticRegression(max_iter=2000, random_state=cfg3['seed'], C=params['C']))
+    ])
+    pipe.fit(X_train_stable, y_train)
+    valid_prob = pipe.predict_proba(X_valid_stable)[:, 1]
+    valid_pred = (valid_prob >= 0.5).astype(int)
+    valid_f1 = f1_score(y_valid, valid_pred, zero_division=0)
+    if valid_f1 > best_valid_f1:
+        best_valid_f1 = valid_f1
+        best_stable = pipe
+        best_stable_params = params
+
+val_prob = best_stable.predict_proba(X_valid_stable)[:, 1]
+test_prob = best_stable.predict_proba(X_test_stable)[:, 1]
+
+val_metrics = compute_metrics(y_valid, (val_prob >= 0.5).astype(int), val_prob)
+test_metrics = compute_metrics(y_test, (test_prob >= 0.5).astype(int), test_prob)
+append_result(results_rows, 'go_validation', 'L3_STABLE_ONLY', val_metrics, {'best_params': json.dumps(best_stable_params)})
+append_result(results_rows, 'imdb_test', 'L3_STABLE_ONLY', test_metrics, {'best_params': json.dumps(best_stable_params)})
+
+prediction_frame(go_valid, 'L3_STABLE_ONLY', val_prob).to_csv(preds_dir / 'l3_stable_only_go_validation_preds.csv', index=False, encoding='utf-8-sig')
+prediction_frame(imdb_test, 'L3_STABLE_ONLY', test_prob).to_csv(preds_dir / 'l3_stable_only_imdb_test_preds.csv', index=False, encoding='utf-8-sig')
+
+import os
+os.environ["CUDA_LAUNCH_BLOCKING"] = "1"
+
+import torch
+from torch import nn
+from torch.utils.data import Dataset
+from transformers import AutoTokenizer, AutoModel, AutoModelForSequenceClassification, Trainer, TrainingArguments, EarlyStoppingCallback
+
+DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+print('DEVICE:', DEVICE)
+
+import inspect
+
+
+class TextDataset(Dataset):
+    def __init__(self, texts, labels, tokenizer, max_length):
+        self.texts = list(texts)
+        self.labels = None if labels is None else list(labels)
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+
+    def __len__(self):
+        return len(self.texts)
+
+    def __getitem__(self, idx):
+        enc = self.tokenizer(
+            self.texts[idx],
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
+        item = {k: v.squeeze(0) for k, v in enc.items()}
+        if self.labels is not None:
+            item['labels'] = torch.tensor(int(self.labels[idx]), dtype=torch.long)
+        return item
+
+
+def trainer_compute_metrics(eval_pred):
+    logits, labels = eval_pred
+    probs = torch.softmax(torch.tensor(logits), dim=1)[:, 1].numpy()
+    preds = (probs >= 0.5).astype(int)
+    return compute_metrics(labels, preds, probs)
+
+
+def build_training_arguments(output_dir):
+    sig = inspect.signature(TrainingArguments.__init__)
+    valid_keys = set(sig.parameters.keys())
+
+    arg_map = {
+        'output_dir': str(output_dir),
+        'learning_rate': cfg3['text_learning_rate'],
+        'per_device_train_batch_size': cfg3['text_batch_size'],
+        'per_device_eval_batch_size': cfg3['text_batch_size'],
+        'num_train_epochs': cfg3['text_num_epochs'],
+        'weight_decay': cfg3['text_weight_decay'],
+        'warmup_ratio': cfg3['text_warmup_ratio'],
+        'seed': cfg3['seed'],
+        'report_to': 'none',
+        'save_strategy': 'epoch',
+        'logging_strategy': 'steps',
+        'logging_steps': 100,
+        'load_best_model_at_end': True,
+        'metric_for_best_model': 'f1',
+        'greater_is_better': True,
+    }
+
+    if 'overwrite_output_dir' in valid_keys:
+        arg_map['overwrite_output_dir'] = True
+
+    if 'evaluation_strategy' in valid_keys:
+        arg_map['evaluation_strategy'] = 'epoch'
+    elif 'eval_strategy' in valid_keys:
+        arg_map['eval_strategy'] = 'epoch'
+
+    filtered = {k: v for k, v in arg_map.items() if k in valid_keys}
+    return TrainingArguments(**filtered)
+
+
+def train_text_only_model(train_df, valid_df, run_name):
+    tokenizer = AutoTokenizer.from_pretrained(cfg3['text_model_name'])
+    model = AutoModelForSequenceClassification.from_pretrained(
+        cfg3['text_model_name'],
+        num_labels=2
+    )
+
+    train_ds = TextDataset(
+        train_df['text'].astype(str).tolist(),
+        train_df['label'].astype(int).tolist(),
+        tokenizer,
+        cfg3['text_max_length']
+    )
+    valid_ds = TextDataset(
+        valid_df['text'].astype(str).tolist(),
+        valid_df['label'].astype(int).tolist(),
+        tokenizer,
+        cfg3['text_max_length']
+    )
+
+    args = build_training_arguments(models_dir / run_name)
+
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=valid_ds,
+        compute_metrics=trainer_compute_metrics,
+    )
+
+    trainer.train()
+    return trainer, tokenizer
+
+
+def predict_text_only(trainer, tokenizer, df):
+    ds = TextDataset(
+        df['text'].astype(str).tolist(),
+        df['label'].astype(int).tolist(),
+        tokenizer,
+        cfg3['text_max_length']
+    )
+    pred_output = trainer.predict(ds)
+    logits = pred_output.predictions
+    probs = torch.softmax(torch.tensor(logits), dim=1)[:, 1].numpy()
+    return probs
+
+text_trainer, text_tokenizer = train_text_only_model(go_train, go_valid, 'l5_text_only_main')
+
+val_prob = predict_text_only(text_trainer, text_tokenizer, go_valid)
+test_prob = predict_text_only(text_trainer, text_tokenizer, imdb_test)
+
+val_metrics = compute_metrics(y_valid, (val_prob >= 0.5).astype(int), val_prob)
+test_metrics = compute_metrics(y_test, (test_prob >= 0.5).astype(int), test_prob)
+append_result(results_rows, 'go_validation', 'L5_TEXT_ONLY', val_metrics)
+append_result(results_rows, 'imdb_test', 'L5_TEXT_ONLY', test_metrics)
+
+prediction_frame(go_valid, 'L5_TEXT_ONLY', val_prob).to_csv(preds_dir / 'l5_text_only_go_validation_preds.csv', index=False, encoding='utf-8-sig')
+prediction_frame(imdb_test, 'L5_TEXT_ONLY', test_prob).to_csv(preds_dir / 'l5_text_only_imdb_test_preds.csv', index=False, encoding='utf-8-sig')
+
+skf = StratifiedKFold(n_splits=cfg3['oof_n_splits'], shuffle=True, random_state=cfg3['seed'])
+oof_prob = np.zeros(len(go_train), dtype=float)
+fold_rows = []
+
+for fold_id, (tr_idx, va_idx) in enumerate(skf.split(go_train, go_train['label'].astype(int)), start=1):
+    fold_train = go_train.iloc[tr_idx].reset_index(drop=True)
+    fold_valid = go_train.iloc[va_idx].reset_index(drop=True)
+
+    trainer, tokenizer = train_text_only_model(fold_train, fold_valid, f'l5_text_only_oof_fold_{fold_id}')
+    fold_prob = predict_text_only(trainer, tokenizer, fold_valid)
+    oof_prob[va_idx] = fold_prob
+
+    fold_pred = (fold_prob >= 0.5).astype(int)
+    fold_metrics = compute_metrics(fold_valid['label'].astype(int).to_numpy(), fold_pred, fold_prob)
+    fold_rows.append({'fold_id': fold_id, **fold_metrics})
+
+    del trainer
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+oof_df = go_train[['id', 'text', 'label'] + cfg3['stable_features']].copy()
+oof_df['text_only_oof_prob'] = oof_prob
+oof_df['text_only_oof_pred'] = (oof_prob >= 0.5).astype(int)
+oof_df.to_csv(preds_dir / 'oof_predictions_go.csv', index=False, encoding='utf-8-sig')
+pd.DataFrame(fold_rows).to_csv(reports_dir / 'oof_fold_metrics.csv', index=False, encoding='utf-8-sig')
+
+class FusionDataset(Dataset):
+    def __init__(self, df, tokenizer, max_length, feature_cols):
+        self.df = df.reset_index(drop=True).copy()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.feature_cols = list(feature_cols)
+
+    def __len__(self):
+        return len(self.df)
+
+    def __getitem__(self, idx):
+        row = self.df.iloc[idx]
+
+        enc = self.tokenizer(
+            str(row['text']),
+            truncation=True,
+            padding='max_length',
+            max_length=self.max_length,
+            return_tensors='pt'
+        )
+
+        item = {k: v.squeeze(0) for k, v in enc.items()}
+
+        feat = row[self.feature_cols].astype(float).to_numpy(dtype=np.float32)
+        item['features'] = torch.tensor(feat, dtype=torch.float32)
+        item['labels'] = torch.tensor(int(row['label']), dtype=torch.long)
+
+        return item
+
+
+class EarlyFusionModel(nn.Module):
+    def __init__(self, model_name, num_extra_features, dropout=0.1):
+        super().__init__()
+        self.encoder = AutoModel.from_pretrained(model_name)
+        hidden_size = self.encoder.config.hidden_size
+        self.dropout = nn.Dropout(dropout)
+        self.classifier = nn.Linear(hidden_size + num_extra_features, 2)
+
+    def forward(self, input_ids=None, attention_mask=None, features=None, labels=None):
+        outputs = self.encoder(input_ids=input_ids, attention_mask=attention_mask)
+
+        if hasattr(outputs, 'last_hidden_state'):
+            cls_vec = outputs.last_hidden_state[:, 0, :]
+        else:
+            cls_vec = outputs[0][:, 0, :]
+
+        if features is None:
+            raise ValueError('features is None in EarlyFusionModel.forward().')
+
+        features = features.to(device=cls_vec.device, dtype=cls_vec.dtype)
+
+        if features.dim() != 2:
+            raise ValueError(f'features must be 2D, got shape {tuple(features.shape)}')
+
+        if cls_vec.size(0) != features.size(0):
+            raise ValueError(
+                f'batch mismatch: cls batch={cls_vec.size(0)}, features batch={features.size(0)}'
+            )
+
+        merged = torch.cat([self.dropout(cls_vec), features], dim=1)
+        logits = self.classifier(merged)
+
+        loss = None
+        if labels is not None:
+            labels = labels.to(logits.device)
+            loss = nn.CrossEntropyLoss()(logits, labels)
+
+        return {'loss': loss, 'logits': logits}
+
+
+def train_early_fusion_model(train_df, valid_df, run_name):
+    tokenizer = AutoTokenizer.from_pretrained(cfg3['text_model_name'])
+    model = EarlyFusionModel(cfg3['text_model_name'], len(cfg3['stable_features']))
+
+    train_ds = FusionDataset(
+        train_df,
+        tokenizer,
+        cfg3['text_max_length'],
+        cfg3['stable_features']
+    )
+    valid_ds = FusionDataset(
+        valid_df,
+        tokenizer,
+        cfg3['text_max_length'],
+        cfg3['stable_features']
+    )
+
+    args = build_training_arguments(models_dir / run_name)
+
+    trainer = Trainer(
+        model=model,
+        args=args,
+        train_dataset=train_ds,
+        eval_dataset=valid_ds,
+        compute_metrics=trainer_compute_metrics,
+    )
+
+    trainer.train()
+    return trainer, tokenizer
+
+
+def predict_early_fusion(trainer, tokenizer, df):
+    ds = FusionDataset(
+        df,
+        tokenizer,
+        cfg3['text_max_length'],
+        cfg3['stable_features']
+    )
+    pred_output = trainer.predict(ds)
+    logits = pred_output.predictions
+    probs = torch.softmax(torch.tensor(logits), dim=1)[:, 1].numpy()
+    return probs
+
+early_trainer, early_tokenizer = train_early_fusion_model(
+    go_train,
+    go_valid,
+    'l5_early_fusion_main'
+)
+
+val_prob = predict_early_fusion(early_trainer, early_tokenizer, go_valid)
+test_prob = predict_early_fusion(early_trainer, early_tokenizer, imdb_test)
+
+val_metrics = compute_metrics(
+    go_valid['label'].astype(int).to_numpy(),
+    (val_prob >= 0.5).astype(int),
+    val_prob
+)
+
+test_metrics = compute_metrics(
+    imdb_test['label'].astype(int).to_numpy(),
+    (test_prob >= 0.5).astype(int),
+    test_prob
+)
+append_result(results_rows, 'go_validation', 'L5_EARLY_FUSION', val_metrics)
+append_result(results_rows, 'imdb_test', 'L5_EARLY_FUSION', test_metrics)
+
+prediction_frame(go_valid, 'L5_EARLY_FUSION', val_prob).to_csv(
+    preds_dir / 'l5_early_fusion_go_validation_preds.csv',
+    index=False,
+    encoding='utf-8-sig'
+)
+prediction_frame(imdb_test, 'L5_EARLY_FUSION', test_prob).to_csv(
+    preds_dir / 'l5_early_fusion_imdb_test_preds.csv',
+    index=False,
+    encoding='utf-8-sig'
+)
+
+try:
+    results_rows
+except NameError:
+    results_rows = []
+
+append_result
+prediction_frame
+compute_metrics
+
+val_metrics = compute_metrics(
+    go_valid['label'].astype(int).to_numpy(),
+    (val_prob >= 0.5).astype(int),
+    val_prob
+)
+
+test_metrics = compute_metrics(
+    imdb_test['label'].astype(int).to_numpy(),
+    (test_prob >= 0.5).astype(int),
+    test_prob
+)
+
+append_result(results_rows, 'go_validation', 'L5_EARLY_FUSION', val_metrics)
+append_result(results_rows, 'imdb_test', 'L5_EARLY_FUSION', test_metrics)
+
+prediction_frame(go_valid, 'L5_EARLY_FUSION', val_prob).to_csv(
+    preds_dir / 'l5_early_fusion_go_validation_preds.csv',
+    index=False,
+    encoding='utf-8-sig'
+)
+
+prediction_frame(imdb_test, 'L5_EARLY_FUSION', test_prob).to_csv(
+    preds_dir / 'l5_early_fusion_imdb_test_preds.csv',
+    index=False,
+    encoding='utf-8-sig'
+)
+
+print('Validation metrics:', val_metrics)
+print('Test metrics:', test_metrics)
+print('results_rows length:', len(results_rows))
+print(results_rows[-2:])
+
+print((preds_dir / 'l5_early_fusion_go_validation_preds.csv').exists())
+print((preds_dir / 'l5_early_fusion_imdb_test_preds.csv').exists())
+
+results_df = pd.DataFrame(results_rows)
+results_df.to_csv(
+    preds_dir / 'l5_early_fusion_results.csv',
+    index=False,
+    encoding='utf-8-sig'
+)
+
+print((preds_dir / 'l5_early_fusion_results.csv').exists())
+results_df
+
+results_df = pd.DataFrame(results_rows)
+results_df = results_df.drop_duplicates(
+    subset=['split_name', 'model_name'],
+    keep='last'
+).reset_index(drop=True)
+
+results_rows = results_df.to_dict('records')
+
+print('results_rows length =', len(results_rows))
+results_df
+
+results_df[['split_name', 'model_name']]
+
+oof_df = pd.read_csv(preds_dir / 'oof_predictions_go.csv')
+text_val_df = pd.read_csv(preds_dir / 'l5_text_only_go_validation_preds.csv')
+text_test_df = pd.read_csv(preds_dir / 'l5_text_only_imdb_test_preds.csv')
+
+residual_feature_cols = ['text_only_oof_prob'] + cfg3['stable_features']
+residual_train = oof_df[['label'] + residual_feature_cols].copy()
+
+residual_clf = Pipeline([
+    ('scaler', StandardScaler()),
+    ('clf', LogisticRegression(max_iter=2000, random_state=cfg3['seed'], C=cfg3['residual_lr_C']))
+])
+residual_clf.fit(residual_train[residual_feature_cols], residual_train['label'].astype(int))
+
+val_residual_input = go_valid[cfg3['stable_features']].copy()
+val_residual_input.insert(0, 'text_only_oof_prob', text_val_df['pred_prob'].astype(float).to_numpy())
+val_prob = residual_clf.predict_proba(val_residual_input[residual_feature_cols])[:, 1]
+
+imdb_residual_input = imdb_test[cfg3['stable_features']].copy()
+imdb_residual_input.insert(0, 'text_only_oof_prob', text_test_df['pred_prob'].astype(float).to_numpy())
+test_prob = residual_clf.predict_proba(imdb_residual_input[residual_feature_cols])[:, 1]
+
+val_metrics = compute_metrics(y_valid, (val_prob >= 0.5).astype(int), val_prob)
+test_metrics = compute_metrics(y_test, (test_prob >= 0.5).astype(int), test_prob)
+append_result(results_rows, 'go_validation', 'L5_RESIDUAL_FUSION', val_metrics)
+append_result(results_rows, 'imdb_test', 'L5_RESIDUAL_FUSION', test_metrics)
+
+prediction_frame(go_valid, 'L5_RESIDUAL_FUSION', val_prob).to_csv(preds_dir / 'l5_residual_fusion_go_validation_preds.csv', index=False, encoding='utf-8-sig')
+prediction_frame(imdb_test, 'L5_RESIDUAL_FUSION', test_prob).to_csv(preds_dir / 'l5_residual_fusion_imdb_test_preds.csv', index=False, encoding='utf-8-sig')
+
+def compute_ecr_tables(text_df, fusion_df, dataset_name):
+    merged = text_df[['id', 'text', 'label', 'pred_prob', 'pred_label']].copy().rename(columns={
+        'pred_prob': 'text_only_prob',
+        'pred_label': 'text_only_pred',
+    })
+    fused = fusion_df[['id', 'pred_prob', 'pred_label']].copy().rename(columns={
+        'pred_prob': 'fusion_prob',
+        'pred_label': 'fusion_pred',
+    })
+    merged = merged.merge(fused, on='id', how='left')
+
+    base_wrong = merged['text_only_pred'].astype(int) != merged['label'].astype(int)
+    fusion_correct = merged['fusion_pred'].astype(int) == merged['label'].astype(int)
+    corrected = base_wrong & fusion_correct
+
+    text_conf = np.maximum(merged['text_only_prob'].astype(float), 1.0 - merged['text_only_prob'].astype(float))
+    high_conf_wrong = base_wrong & (text_conf >= cfg3['high_conf_threshold'])
+    hc_corrected = high_conf_wrong & fusion_correct
+
+    denom_ecr = int(base_wrong.sum())
+    denom_hc = int(high_conf_wrong.sum())
+
+    ecr = float(corrected.sum() / denom_ecr) if denom_ecr > 0 else np.nan
+    hc_ecr = float(hc_corrected.sum() / denom_hc) if denom_hc > 0 else np.nan
+
+    merged['was_text_only_wrong'] = base_wrong
+    merged['was_corrected'] = corrected
+    merged['text_only_conf'] = text_conf
+    merged['was_high_confidence_error'] = high_conf_wrong
+    merged['was_high_confidence_corrected'] = hc_corrected
+    merged['dataset_name'] = dataset_name
+
+    summary = {
+        'dataset_name': dataset_name,
+        'text_only_errors': denom_ecr,
+        'corrected_errors': int(corrected.sum()),
+        'ecr': ecr,
+        'text_only_high_conf_errors': denom_hc,
+        'high_conf_corrected_errors': int(hc_corrected.sum()),
+        'hc_ecr': hc_ecr,
+    }
+    return merged, summary
+
+val_text = pd.read_csv(preds_dir / 'l5_text_only_go_validation_preds.csv')
+val_fusion = pd.read_csv(preds_dir / 'l5_residual_fusion_go_validation_preds.csv')
+val_cases, val_ecr = compute_ecr_tables(val_text, val_fusion, 'go_validation')
+
+imdb_text = pd.read_csv(preds_dir / 'l5_text_only_imdb_test_preds.csv')
+imdb_fusion = pd.read_csv(preds_dir / 'l5_residual_fusion_imdb_test_preds.csv')
+imdb_cases, imdb_ecr = compute_ecr_tables(imdb_text, imdb_fusion, 'imdb_test')
+
+feature_lookup = pd.concat([
+    go_valid[['id'] + cfg3['stable_features'] + [c for c in ['lengthbin', 'length_bin'] if c in go_valid.columns]],
+    imdb_test[['id'] + cfg3['stable_features'] + [c for c in ['lengthbin', 'length_bin'] if c in imdb_test.columns]],
+], ignore_index=True).drop_duplicates('id')
+
+error_cases = pd.concat([val_cases, imdb_cases], ignore_index=True)
+error_cases = error_cases.merge(feature_lookup, on='id', how='left')
+error_cases.to_csv(reports_dir / 'error_case_analysis.csv', index=False, encoding='utf-8-sig')
+pd.DataFrame([val_ecr, imdb_ecr]).to_csv(reports_dir / 'ecr_summary.csv', index=False, encoding='utf-8-sig')
+
+results_df = pd.DataFrame(results_rows)
+results_df.to_csv(reports_dir / 'results_summary.csv', index=False, encoding='utf-8-sig')
+
+log_lines = [
+    'Step 3 finished.',
+    f'GoEmotions input: {go_path}',
+    f'IMDb input: {imdb_path}',
+    f'Stable feature input: {stable_path}',
+    f'Stable features: {cfg3["stable_features"]}',
+    f'Text backbone: {cfg3["text_model_name"]}',
+    f'OOF folds: {cfg3["oof_n_splits"]}',
+    f'OOF CV type: {cfg3["oof_cv_type"]}',
+    f'High-confidence threshold: {cfg3["high_conf_threshold"]}',
+    f'Output folder: {step3_dir}',
+    f'Results summary: {reports_dir / "results_summary.csv"}',
+    f'ECR summary: {reports_dir / "ecr_summary.csv"}',
+    f'Error case analysis: {reports_dir / "error_case_analysis.csv"}',
+]
+with open(step3_dir / 'step3_log.txt', 'w', encoding='utf-8') as f:
+    f.write("\n".join(log_lines))
+
+try:
+    print((outdir / 'results_summary.csv').exists())
+    print((outdir / 'ecr_summary.csv').exists())
+except NameError:
+    from pathlib import Path
+    print(Path('results_summary.csv').exists())
+    print(Path('ecr_summary.csv').exists())
+
+results_rows = []
+
+reports_dir = preds_dir.parent / 'reports'
+results_summary = pd.read_csv(reports_dir / 'results_summary.csv')
+ecr_summary = pd.read_csv(reports_dir / 'ecr_summary.csv')
+
+results_summary
+ecr_summary
+\end{lstlisting}
+
+\subsection*{step4_report.ipynb}
+\begin{lstlisting}[language=Python, caption={step4_report.ipynb}]
+from pathlib import Path
+import json
+import pandas as pd
+import numpy as np
+
+try:
+    import plotly.express as px
+    import plotly.graph_objects as go
+    PLOTLY_OK = True
+except Exception:
+    PLOTLY_OK = False
+
+root = Path(r'C:\Users\cdex1\Desktop\课件\90\ass2\实验2')
+reports_dir = root / 'outputs' / 'step3_models' / 'reports'
+preds_dir = root / 'outputs' / 'step3_models' / 'predictions'
+step4_dir = root / 'outputs' / 'step4_report'
+step4_dir.mkdir(parents=True, exist_ok=True)
+
+results_summary = pd.read_csv(reports_dir / 'results_summary.csv')
+ecr_summary = pd.read_csv(reports_dir / 'ecr_summary.csv')
+error_case_analysis = pd.read_csv(reports_dir / 'error_case_analysis.csv')
+
+config_path = root / 'outputs' / 'data_prep' / 'config.json'
+config_data = json.loads(config_path.read_text(encoding='utf-8')) if config_path.exists() else {}
+seed = config_data.get('cfg', {}).get('seed', 42)
+
+required = pd.DataFrame([
+    {'artifact': 'results_summary.csv', 'exists': (reports_dir / 'results_summary.csv').exists(), 'path': str(reports_dir / 'results_summary.csv')},
+    {'artifact': 'ecr_summary.csv', 'exists': (reports_dir / 'ecr_summary.csv').exists(), 'path': str(reports_dir / 'ecr_summary.csv')},
+    {'artifact': 'error_case_analysis.csv', 'exists': (reports_dir / 'error_case_analysis.csv').exists(), 'path': str(reports_dir / 'error_case_analysis.csv')},
+    {'artifact': 'l5_early_fusion_results.csv', 'exists': (preds_dir / 'l5_early_fusion_results.csv').exists(), 'path': str(preds_dir / 'l5_early_fusion_results.csv')},
+])
+required
+
+model_order = ['L1_TFIDF_LR', 'L3_STABLE_ONLY', 'L5_TEXT_ONLY', 'L5_EARLY_FUSION', 'L5_RESIDUAL_FUSION']
+label_map = {
+    'L1_TFIDF_LR': 'L1 TF-IDF',
+    'L3_STABLE_ONLY': 'L3 Stable-only',
+    'L5_TEXT_ONLY': 'L5 Text-only',
+    'L5_EARLY_FUSION': 'L5 Early',
+    'L5_RESIDUAL_FUSION': 'L5 Residual'
+}
+plot_df = results_summary[results_summary['model_name'].isin(model_order)].copy()
+plot_df['model_short'] = plot_df['model_name'].map(label_map)
+plot_df['dataset_short'] = plot_df['split_name'].map({'go_validation': 'GoEmotions Validation', 'imdb_test': 'IMDb Test'})
+plot_df = plot_df.sort_values(['model_name', 'split_name'])
+plot_df[['model_short', 'dataset_short', 'f1']]
+
+if PLOTLY_OK:
+    fig = px.bar(
+        plot_df,
+        x='model_short',
+        y='f1',
+        color='dataset_short',
+        barmode='group',
+        title='Domain Shift Penalty: Validation vs Test F1',
+        labels={'model_short': 'Model', 'f1': 'F1', 'dataset_short': 'Split'},
+        color_discrete_sequence=['#2E86AB', '#F18F01']
+    )
+    fig.update_layout(template='plotly_white', legend_title_text='Split', height=540, width=980)
+    fig.write_html(step4_dir / 'domain_shift_penalty.html')
+    print(step4_dir / 'domain_shift_penalty.html')
+else:
+    print('plotly unavailable; skipping domain-shift HTML chart')
+
+if {'text_only_prob', 'fusion_prob'}.issubset(error_case_analysis.columns) and PLOTLY_OK:
+    ec = error_case_analysis.copy()
+    fig = px.scatter(
+        ec,
+        x='text_only_prob',
+        y='fusion_prob',
+        color='dataset_name' if 'dataset_name' in ec.columns else None,
+        hover_data=[c for c in ['text', 'note', 'exclaim_cnt', 'downtoner_cnt'] if c in ec.columns],
+        title='Residual Correction: Text-only Probability vs Fusion Probability',
+        labels={'text_only_prob': 'Text-only probability', 'fusion_prob': 'Fusion probability'}
+    )
+    fig.add_hline(y=0.5, line_dash='dash', line_color='gray')
+    fig.add_vline(x=0.5, line_dash='dash', line_color='gray')
+    fig.update_layout(template='plotly_white', height=560, width=980)
+    fig.write_html(step4_dir / 'residual_correction_scatter.html')
+    print(step4_dir / 'residual_correction_scatter.html')
+else:
+    print('scatter chart skipped because plotly is unavailable or required columns are missing')
+
+ecr_summary.assign(seed=seed)
+
+case_cols = [c for c in ['dataset_name', 'text', 'text_only_prob', 'fusion_prob', 'label', 'pred_text_only', 'pred_fusion', 'exclaim_cnt', 'question_cnt', 'downtoner_cnt', 'exclaim_per_100w', 'downtoner_per_100w', 'note'] if c in error_case_analysis.columns]
+case_preview = error_case_analysis[case_cols].head(8).copy()
+case_preview.to_csv(step4_dir / 'case_study_preview.csv', index=False, encoding='utf-8-sig')
+case_preview
+
+repro = pd.DataFrame([
+    {'item': 'seed', 'value': seed},
+    {'item': 'results_summary', 'value': str(reports_dir / 'results_summary.csv')},
+    {'item': 'ecr_summary', 'value': str(reports_dir / 'ecr_summary.csv')},
+    {'item': 'error_case_analysis', 'value': str(reports_dir / 'error_case_analysis.csv')},
+    {'item': 'predictions_dir', 'value': str(preds_dir)},
+    {'item': 'reports_dir', 'value': str(reports_dir)},
+    {'item': 'step4_notebook', 'value': str(step4_dir / 'step4_report3.ipynb')},
+])
+repro.to_csv(step4_dir / 'reproducibility_checklist.csv', index=False, encoding='utf-8-sig')
+repro
+
+report_md = (
+    '# Step 4 Results & Analysis\n\n'
+    '## Overall performance\n'
+    'The grouped comparison shows a clear domain shift penalty from GoEmotions validation to IMDb test. '
+    'L1 TF-IDF and L5 text-only perform strongly on validation but drop on IMDb, while stable-only features remain predictive but do not close the gap. '
+    'Early fusion and residual fusion improve local behavior more than global F1.\n\n'
+    '## Residual correction\n'
+    'Residual fusion corrects a small but meaningful subset of text-only errors. The ECR is low and HC-ECR is extremely small, '
+    'which suggests the stable features work as a local correction signal rather than a global replacement for text evidence.\n\n'
+    '## Case studies\n'
+    'Use `case_study_preview.csv` to highlight concrete examples where punctuation density or downtoner patterns moved predictions across the 0.5 threshold.\n\n'
+    '## Reproducibility checklist\n'
+    f'- Seed: {seed}\n'
+    '- Raw and cleaned data: `data/`\n'
+    '- Predictions: `outputs/step3_models/predictions/`\n'
+    '- Reports: `outputs/step3_models/reports/`\n'
+    '- Step 4 notebook: `outputs/step4_report/step4_report3.ipynb`\n'
+)
+(step4_dir / 'report.md').write_text(report_md, encoding='utf-8')
+print(report_md)
+\end{lstlisting}
+
+\subsection*{step5_dynamic_report.ipynb}
+\begin{lstlisting}[language=Python, caption={step5_dynamic_report.ipynb}]
+%pip install plotly
+
+from pathlib import Path
+import pandas as pd
+import numpy as np
+import plotly.express as px
+import plotly.graph_objects as go
+
+root = Path(r'C:\Users\cdex1\Desktop\课件\90\ass2\实验2')
+step3_dir = root / 'outputs' / 'step3_models' / 'reports'
+step5_dir = root / 'outputs' / 'step5_reports'
+step5_dir.mkdir(parents=True, exist_ok=True)
+
+results_path = step3_dir / 'results_summary.csv'
+ecr_path = step3_dir / 'ecr_summary.csv'
+err_path = step3_dir / 'error_case_analysis.csv'
+feature_stats_path = step3_dir / 'all_features_stats.csv'
+stable_final_path = step3_dir / 'stable_features_final.csv'
+
+checks = pd.DataFrame([
+    {'file': 'results_summary.csv', 'exists': results_path.exists(), 'path': str(results_path)},
+    {'file': 'ecr_summary.csv', 'exists': ecr_path.exists(), 'path': str(ecr_path)},
+    {'file': 'error_case_analysis.csv', 'exists': err_path.exists(), 'path': str(err_path)},
+    {'file': 'all_features_stats.csv', 'exists': feature_stats_path.exists(), 'path': str(feature_stats_path)},
+    {'file': 'stable_features_final.csv', 'exists': stable_final_path.exists(), 'path': str(stable_final_path)},
+])
+checks
+
+results = pd.read_csv(results_path)
+ecr = pd.read_csv(ecr_path)
+err = pd.read_csv(err_path)
+results.head()
+
+model_order = ['L1_TFIDF_LR','L3_STABLE_ONLY','L5_TEXT_ONLY','L5_EARLY_FUSION','L5_RESIDUAL_FUSION']
+label_map = {'L1_TFIDF_LR':'L1 TF-IDF','L3_STABLE_ONLY':'L3 Stable-only','L5_TEXT_ONLY':'L5 Text-only','L5_EARLY_FUSION':'L5 Early','L5_RESIDUAL_FUSION':'L5 Residual'}
+plot_df = results[results['model_name'].isin(model_order)].copy()
+plot_df['model_short'] = plot_df['model_name'].map(label_map)
+plot_df['dataset_short'] = plot_df['split_name'].map({'go_validation':'GoEmotions Validation','imdb_test':'IMDb Test'})
+fig = px.bar(plot_df, x='model_short', y='f1', color='dataset_short', barmode='group', title='Model Performance Summary', labels={'model_short':'Model','f1':'F1','dataset_short':'Split'})
+fig.update_layout(template='plotly_white', height=520, width=980)
+fig.write_html(step5_dir / 'figure_model_performance.html')
+print(step5_dir / 'figure_model_performance.html')
+
+ecr_df = ecr.copy()
+fig = go.Figure()
+fig.add_trace(go.Bar(x=ecr_df['dataset_name'], y=ecr_df['ecr'], name='ECR'))
+fig.add_trace(go.Bar(x=ecr_df['dataset_name'], y=ecr_df['hc_ecr'], name='HC-ECR'))
+fig.update_layout(barmode='group', template='plotly_white', title='Error Correction Rates', height=500, width=900)
+fig.write_html(step5_dir / 'figure_ecr.html')
+print(step5_dir / 'figure_ecr.html')
+
+if feature_stats_path.exists():
+    feat = pd.read_csv(feature_stats_path)
+    cols = [c for c in feat.columns if c.lower() in ['feature_name','feature_group','jsd','stability_score','effect_size','selected_final']]
+    feat[cols].head().to_csv(step5_dir / 'table_feature_stability_preview.csv', index=False, encoding='utf-8-sig')
+    fig = px.scatter(feat, x='jsd', y='stability_score' if 'stability_score' in feat.columns else feat.columns[0], color='feature_group' if 'feature_group' in feat.columns else None, title='Feature Stability vs Predictive Signal')
+    fig.update_layout(template='plotly_white', height=540, width=980)
+    fig.write_html(step5_dir / 'figure_feature_stability.html')
+    print(step5_dir / 'figure_feature_stability.html')
+
+if stable_final_path.exists():
+    stable = pd.read_csv(stable_final_path)
+    stable.head().to_csv(step5_dir / 'table_top_stable_features.csv', index=False, encoding='utf-8-sig')
+
+if err.shape[0] > 0:
+    preview = err.head(10).copy()
+    preview.to_csv(step5_dir / 'table_error_cases_preview.csv', index=False, encoding='utf-8-sig')
+    if {'text_only_prob','fusion_prob'}.issubset(err.columns):
+        fig = px.scatter(err, x='text_only_prob', y='fusion_prob', title='Text-only vs Fusion Probability', opacity=0.7)
+        fig.add_hline(y=0.5, line_dash='dash', line_color='gray')
+        fig.add_vline(x=0.5, line_dash='dash', line_color='gray')
+        fig.update_layout(template='plotly_white', height=560, width=980)
+        fig.write_html(step5_dir / 'figure_error_cases.html')
+        print(step5_dir / 'figure_error_cases.html')
+
+summary = pd.DataFrame([
+    {'item':'results_file', 'value': str(results_path)},
+    {'item':'ecr_file', 'value': str(ecr_path)},
+    {'item':'error_case_file', 'value': str(err_path)},
+    {'item':'feature_stats_file', 'value': str(feature_stats_path)},
+    {'item':'stable_features_file', 'value': str(stable_final_path)},
+])
+summary
+\end{lstlisting}
+
+\subsection*{step5_inventory.ipynb}
+\begin{lstlisting}[language=Python, caption={step5_inventory.ipynb}]
+from pathlib import Path
+import json
+import pandas as pd
+from datetime import datetime
+
+root = Path(r'C:\Users\cdex1\Desktop\课件\90\ass2\实验2')
+paths_to_scan = [
+    root / 'data',
+    root / 'outputs',
+]
+inventory_dir = root / 'outputs' / 'step5_inventory'
+inventory_dir.mkdir(parents=True, exist_ok=True)
+
+rows = []
+for base in paths_to_scan:
+    if not base.exists():
+        continue
+    for f in base.rglob('*'):
+        if f.is_file():
+            stat = f.stat()
+            rel = f.relative_to(root)
+            stage = rel.parts[1] if len(rel.parts) > 1 and rel.parts[0] in ['data', 'outputs'] else 'root'
+            ext = f.suffix.lower()
+            rows.append({
+                'file_name': f.name,
+                'file_path': str(f),
+                'relative_path': str(rel),
+                'folder': str(f.parent),
+                'stage': stage,
+                'extension': ext,
+                'size_bytes': stat.st_size,
+                'modified_time': datetime.fromtimestamp(stat.st_mtime).isoformat(timespec='seconds')
+            })
+inv = pd.DataFrame(rows).sort_values(['stage','relative_path']).reset_index(drop=True)
+inv.head(20)
+
+descriptions = {
+    'prep.ipynb': 'Data-preparation notebook that downloads GoEmotions and IMDb, builds cleaned datasets, and writes profiling outputs.',
+    'config.json': 'Configuration file storing seeds, paths, and label-mapping rules for preprocessing.',
+    'results_summary.csv': 'Step 3 summary table with model-level performance metrics on validation and IMDb test splits.',
+    'ecr_summary.csv': 'Step 3 error-correction summary with ECR and HC-ECR for residual fusion analysis.',
+    'error_case_analysis.csv': 'Step 3 sample-level case analysis describing corrected errors and feature signals.',
+    'step4_report.ipynb': 'First Step 4 report notebook draft for performance visualization and narrative writing.',
+    'step4_report2.ipynb': 'Improved Step 4 notebook with report artifacts, case-study preview, and reproducibility checklist.',
+    'step4_report3.ipynb': 'Final Step 4 notebook with validated charts, case-study export, and report text generation.',
+    'report.md': 'Step 4 markdown summary text for direct reuse in the assignment write-up.',
+    'case_study_preview.csv': 'Compact preview of representative corrected examples used in Step 4 case studies.',
+    'reproducibility_checklist.csv': 'Reproducibility checklist listing seed, inputs, and key output paths.',
+    'domain_shift_penalty.html': 'Interactive grouped bar chart showing validation-versus-test F1 drop across models.',
+    'residual_correction_rates.html': 'Interactive bar chart showing ECR and HC-ECR rates.',
+    'residual_correction_scatter.html': 'Scatter plot of text-only probability versus fusion probability with 0.5 decision lines.',
+    'step4_report.html': 'If present, an exported HTML version or related report artifact for Step 4.',
+    'file_inventory.ipynb': 'Step 5 inventory notebook that scans project files and writes a file catalog.',
+}
+inv['description_short'] = inv['file_name'].map(descriptions).fillna('Project file generated during data prep, modeling, analysis, or reporting.')
+inv['used_in_report'] = inv['file_name'].isin(['results_summary.csv','ecr_summary.csv','error_case_analysis.csv','report.md','case_study_preview.csv','reproducibility_checklist.csv']).map({True:'yes', False:'maybe'})
+inv['file_type'] = inv['extension'].replace({'': 'no_extension'})
+inv.head(20)
+
+check_targets = [
+    'results_summary.csv',
+    'ecr_summary.csv',
+    'error_case_analysis.csv',
+    'step4_report3.ipynb',
+    'report.md',
+    'case_study_preview.csv',
+    'reproducibility_checklist.csv',
+]
+checks = []
+for t in check_targets:
+    match = inv[inv['file_name'] == t]
+    checks.append({
+        'file': t,
+        'exists': not match.empty,
+        'count': int(len(match)),
+        'paths': '; '.join(match['relative_path'].tolist()[:3]) if not match.empty else ''
+    })
+checks_df = pd.DataFrame(checks)
+checks_df
+
+inv.to_csv(inventory_dir / 'file_inventory.csv', index=False, encoding='utf-8-sig')
+checks_df.to_csv(inventory_dir / 'inventory_checks.csv', index=False, encoding='utf-8-sig')
+(inv['description_short'].notna().all(), (inventory_dir / 'file_inventory.csv').exists(), (inventory_dir / 'inventory_checks.csv').exists())
+
+md_lines = ['# File Inventory', '', 'This file lists the main project outputs, their paths, and brief descriptions.', '']
+for stage, grp in inv.groupby('stage'):
+    md_lines.append(f'## {stage}')
+    for _, r in grp.iterrows():
+        md_lines.append(f"- **{r['file_name']}** — {r['relative_path']}. {r['description_short']}")
+    md_lines.append('')
+(inventory_dir / 'file_inventory.md').write_text('\n'.join(md_lines), encoding='utf-8')
+print('\n'.join(md_lines[:40]))
+
+summary = pd.DataFrame([
+    {'item':'total_files_scanned', 'value': len(inv)},
+    {'item':'stages_found', 'value': ', '.join(sorted(inv['stage'].dropna().unique()))},
+    {'item':'inventory_csv', 'value': str(inventory_dir / 'file_inventory.csv')},
+    {'item':'inventory_md', 'value': str(inventory_dir / 'file_inventory.md')},
+    {'item':'inventory_checks', 'value': str(inventory_dir / 'inventory_checks.csv')},
+])
+summary
+\end{lstlisting}
+
+\subsection*{step5_static_report.ipynb}
+\begin{lstlisting}[language=Python, caption={step5_static_report.ipynb}]
+from pathlib import Path
+import json
+import pandas as pd
+import numpy as np
+
+root = Path(r'C:\Users\cdex1\Desktop\课件\90\ass2\实验2')
+prep_dir = root / 'outputs' / 'data_prep'
+out_dir = root / 'outputs' / 'step5_reports'
+out_dir.mkdir(parents=True, exist_ok=True)
+
+config_path = prep_dir / 'config.json'
+profile_candidates = [prep_dir / 'profile.csv', prep_dir / 'corpus_profile_report.csv', prep_dir / 'readinesscheck.csv']
+log_candidates = [prep_dir / 'log.txt', prep_dir / 'processlog.txt']
+ready_candidates = [prep_dir / 'ready.csv', prep_dir / 'readinesscheck.csv']
+valid_candidates = [prep_dir / 'valid.csv', prep_dir / 'datasetvalidationreport.csv']
+zero_candidates = [prep_dir / 'go_zero_label.csv', prep_dir / 'zero_label.csv', prep_dir / 'gozerolabel.csv']
+
+def first_existing(candidates):
+    for p in candidates:
+        if p.exists():
+            return p
+    return None
+
+profile_path = first_existing(profile_candidates)
+log_path = first_existing(log_candidates)
+ready_path = first_existing(ready_candidates)
+valid_path = first_existing(valid_candidates)
+zero_path = first_existing(zero_candidates)
+
+checks = pd.DataFrame([
+    {'artifact': 'config', 'path': str(config_path), 'exists': config_path.exists()},
+    {'artifact': 'profile', 'path': str(profile_path) if profile_path else '', 'exists': profile_path is not None},
+    {'artifact': 'log', 'path': str(log_path) if log_path else '', 'exists': log_path is not None},
+    {'artifact': 'ready', 'path': str(ready_path) if ready_path else '', 'exists': ready_path is not None},
+    {'artifact': 'valid', 'path': str(valid_path) if valid_path else '', 'exists': valid_path is not None},
+    {'artifact': 'zero_label', 'path': str(zero_path) if zero_path else '', 'exists': zero_path is not None},
+])
+checks
+
+if not config_path.exists():
+    raise FileNotFoundError(f'Missing config file: {config_path}')
+
+config = json.loads(config_path.read_text(encoding='utf-8'))
+paths = config.get('paths', {})
+cfg = config.get('cfg', {})
+
+if profile_path is None:
+    raise FileNotFoundError('No profile-like file found. Expected one of: profile.csv, corpus_profile_report.csv, readinesscheck.csv')
+
+profile = pd.read_csv(profile_path)
+profile.head()
+
+def safe_columns(df, wanted):
+    return [c for c in wanted if c in df.columns]
+
+preferred = ['dataset', 'split', 'rows', 'n_rows', 'mean_words', 'median_words', 'p25_words', 'p75_words', 'min_words', 'max_words']
+profile_summary = profile[safe_columns(profile, preferred)].copy()
+if profile_summary.empty:
+    profile_summary = pd.DataFrame({'available_columns': profile.columns.tolist()})
+
+profile_summary.to_csv(out_dir / 'step5_profile_summary.csv', index=False, encoding='utf-8-sig')
+profile_summary
+
+label_map_rows = []
+for key in ['positive', 'negative', 'neutral_other', 'priority']:
+    val = cfg.get(key, [])
+    if isinstance(val, list):
+        val = ', '.join(map(str, val))
+    label_map_rows.append({'key': key, 'value': val})
+label_map = pd.DataFrame(label_map_rows)
+label_map.to_csv(out_dir / 'step5_label_mapping.csv', index=False, encoding='utf-8-sig')
+label_map
+
+log_text = ''
+if log_path is not None:
+    log_text = log_path.read_text(encoding='utf-8', errors='ignore')
+log_preview = log_text[:1500]
+log_summary = pd.DataFrame([{
+    'log_found': log_path is not None,
+    'log_path': str(log_path) if log_path else '',
+    'chars_read': len(log_text),
+    'preview': log_preview
+}])
+log_summary.to_csv(out_dir / 'step5_log_summary.csv', index=False, encoding='utf-8-sig')
+log_summary
+
+repro = pd.DataFrame([
+    {'item': 'seed', 'value': cfg.get('seed', 42)},
+    {'item': 'config_path', 'value': str(config_path)},
+    {'item': 'profile_path', 'value': str(profile_path) if profile_path else ''},
+    {'item': 'log_path', 'value': str(log_path) if log_path else ''},
+    {'item': 'ready_path', 'value': str(ready_path) if ready_path else ''},
+    {'item': 'valid_path', 'value': str(valid_path) if valid_path else ''},
+])
+repro.to_csv(out_dir / 'step5_reproducibility.csv', index=False, encoding='utf-8-sig')
+repro
+
+summary = pd.DataFrame([
+    {'metric': 'profile_exists', 'value': profile_path is not None},
+    {'metric': 'log_exists', 'value': log_path is not None},
+    {'metric': 'ready_exists', 'value': ready_path is not None},
+    {'metric': 'valid_exists', 'value': valid_path is not None},
+    {'metric': 'zero_label_exists', 'value': zero_path is not None},
+    {'metric': 'profile_rows', 'value': len(profile)},
+    {'metric': 'profile_columns', 'value': len(profile.columns)},
+])
+summary.to_csv(out_dir / 'step5_execution_summary.csv', index=False, encoding='utf-8-sig')
+summary
+
+md_lines = ['# Step 5 File Inventory', '', 'This notebook reports the key data-prep outputs found in the project.']
+for _, row in checks.iterrows():
+    md_lines.append(f"- {row['artifact']}: {row['path'] if row['exists'] else 'missing'}")
+(out_dir / 'step5_inventory.md').write_text('\n'.join(md_lines), encoding='utf-8')
+'\n'.join(md_lines)
+\end{lstlisting}
